@@ -1,0 +1,19 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.3.13'
+}
+
+repositories {
+    mavenCentral()
+    maven { url 'https://jitpack.io' }
+}
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web:3.3.13'
+    implementation 'org.hyperledger.fabric:fabric-gateway-java:2.2.9'
+}
+
+compileJava {
+    options.release = 17
+    options.encoding = 'UTF-8'
+}

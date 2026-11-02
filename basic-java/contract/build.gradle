@@ -1,0 +1,22 @@
+plugins {
+    id 'application'
+}
+
+repositories {
+    mavenCentral()
+    maven { url 'https://jitpack.io' }
+}
+
+dependencies {
+    implementation 'org.hyperledger.fabric-chaincode-java:fabric-chaincode-shim:2.5.+'
+    implementation 'com.owlike:genson:1.6'
+}
+
+compileJava {
+    options.release = 11
+    options.encoding = 'UTF-8'
+}
+
+application {
+    mainClass = 'org.hyperledger.fabric.contract.ContractRouter'
+}

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Запуск решения: сеть, контракт, API (порт 8091), интерфейс (порт 3006)
+set -e
+trap "kill 0" EXIT
+cd "$(dirname "$0")"
+ROOT=$PWD
+
+cd ../fabric-samples/test-network
+./network.sh down
+./network.sh up createChannel -ca
+./network.sh deployCC -ccn users -ccp "$ROOT/contract" -ccl java
+
+cd "$ROOT/api" && ./gradlew bootRun &
+cd "$ROOT/front" && npm install && npx vite --host --port 3006
