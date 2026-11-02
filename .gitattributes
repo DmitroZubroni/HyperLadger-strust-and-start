@@ -1,0 +1,3 @@
+# Скрипты должны иметь окончания строк LF, иначе не запустятся в Linux и WSL
+* text=auto eol=lf
+*.png binary

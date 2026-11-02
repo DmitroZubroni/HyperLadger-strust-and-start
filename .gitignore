@@ -1,0 +1,8 @@
+node_modules/
+dist/
+target/
+network/crypto/
+network/channel-artifacts/
+.DS_Store
+# Текст конкурсного задания в репозиторий не входит
+*.docx
