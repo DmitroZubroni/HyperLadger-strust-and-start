@@ -53,7 +53,7 @@ cd fabric-samples/test-network
 
 ## 4. Смарт-контракт
 
-Код находится в `contract/src/main/java/users/UsersContract.java`. Метод с аннотацией `@Transaction` доступен из сети.
+Контракт находится в `backend/src/main/java/users/UsersContract.java`, API в том же проекте: `backend/src/api/java/users/Application.java`. Зависимости у них разделены в `build.gradle`, потому что их версии конфликтуют. Метод контракта с аннотацией `@Transaction` доступен из сети.
 
 | Метод | Кто вызывает | Что делает |
 | --- | --- | --- |
@@ -71,18 +71,16 @@ cd fabric-samples/test-network
 Из папки `fabric-samples/test-network`:
 
 ```bash
-./network.sh deployCC -ccn users -ccp ../../basic-java/contract -ccl java
+./network.sh deployCC -ccn users -ccp ../../basic-java/backend -ccl java
 ```
 
 Обновление после правки кода: добавьте `-ccv 2 -ccs 2` и увеличивайте эти номера при каждом следующем обновлении.
 
 ## 6. API
 
-Код находится в `api/src/main/java/users/Application.java`.
-
 ```bash
-cd basic-java/api
-./gradlew bootRun
+cd basic-java/backend
+./gradlew api
 ```
 
 | Маршрут | Тело запроса | Что делает |

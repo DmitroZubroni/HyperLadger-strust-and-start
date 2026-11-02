@@ -1,0 +1,37 @@
+plugins {
+    id 'application'     // контракт: собирается при деплое
+}
+
+repositories {
+    mavenCentral()
+    maven { url 'https://jitpack.io' }
+}
+
+// API лежит рядом с контрактом, но со своими зависимостями: их версии конфликтуют
+sourceSets {
+    api
+}
+
+dependencies {
+    implementation 'org.hyperledger.fabric-chaincode-java:fabric-chaincode-shim:2.5.+'
+    implementation 'com.owlike:genson:1.6'
+
+    apiImplementation 'org.springframework.boot:spring-boot-starter-web:3.3.13'
+    apiImplementation 'org.hyperledger.fabric:fabric-gateway-java:2.2.9'
+}
+
+tasks.withType(JavaCompile) {
+    options.release = 17
+    options.encoding = 'UTF-8'
+    options.compilerArgs << '-parameters'      // Spring берёт имена параметров из кода
+}
+
+application {
+    mainClass = 'org.hyperledger.fabric.contract.ContractRouter'
+}
+
+// Запуск API: ./gradlew api
+tasks.register('api', JavaExec) {
+    classpath = sourceSets.api.runtimeClasspath
+    mainClass = 'users.Application'
+}

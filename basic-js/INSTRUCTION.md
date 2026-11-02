@@ -53,7 +53,7 @@ cd fabric-samples/test-network
 
 ## 4. Смарт-контракт
 
-Код находится в `contract/index.js`.
+Контракт находится в `backend/contract.js`, API рядом с ним в `backend/api.js`.
 
 | Метод | Кто вызывает | Что делает |
 | --- | --- | --- |
@@ -71,17 +71,19 @@ cd fabric-samples/test-network
 Из папки `fabric-samples/test-network`:
 
 ```bash
-./network.sh deployCC -ccn users -ccp ../../basic-js/contract -ccl javascript
+./network.sh deployCC -ccn users -ccp ../../basic-js/backend -ccl javascript
 ```
+
+В `package.json` зависимости контракта лежат в `dependencies`, а зависимости API в `devDependencies`: пир при сборке контракта ставит только первые.
 
 Обновление после правки кода: добавьте `-ccv 2 -ccs 2` и увеличивайте эти номера при каждом следующем обновлении.
 
 ## 6. API
 
 ```bash
-cd basic-js/api
+cd basic-js/backend
 npm install
-node server.js
+node api.js
 ```
 
 | Маршрут | Тело запроса | Что делает |

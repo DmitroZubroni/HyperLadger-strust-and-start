@@ -8,7 +8,7 @@ ROOT=$PWD
 cd ../fabric-samples/test-network
 ./network.sh down
 ./network.sh up createChannel -ca
-./network.sh deployCC -ccn users -ccp "$ROOT/contract" -ccl java
+./network.sh deployCC -ccn users -ccp "$ROOT/backend" -ccl java
 
-cd "$ROOT/api" && ./gradlew bootRun &
+cd "$ROOT/backend" && ./gradlew api &
 cd "$ROOT/front" && npm install && npx vite --host --port 3006
