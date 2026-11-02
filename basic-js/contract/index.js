@@ -41,6 +41,16 @@ class UsersContract extends Contract {
         return JSON.stringify(await readUser(ctx, callerName(ctx)));
     }
 
+    // Изменение своего адреса: заблокированному запрещено
+    async UpdateAddress(ctx, address) {
+        const user = await readUser(ctx, callerName(ctx));
+        if (!user) throw new Error('Пользователь не зарегистрирован');
+        if (user.status === 'blocked') throw new Error('Вы заблокированы и не можете менять данные');
+        user.address = address;
+        await writeUser(ctx, user);
+        return JSON.stringify(user);
+    }
+
     // Все пользователи: только для администратора
     async GetUsers(ctx) {
         if (!isAdmin(ctx)) throw new Error('Доступ только для администратора');

@@ -70,7 +70,7 @@ app.use(cors());
 app.use(express.json());
 
 const route = (handler) => (req, res) => handler(req).then((data) => res.json(data)).catch((err) => {
-    res.status(400).json({ error: err.message });
+    res.status(400).json({ error: /message=(.*)/.exec(err.message)?.[1] || err.message });   // текст ошибки контракта
 });
 
 app.post('/register', route(async (req) => {
