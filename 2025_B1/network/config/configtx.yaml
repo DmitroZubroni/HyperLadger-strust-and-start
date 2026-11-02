@@ -1,0 +1,95 @@
+# Конфигурация канала blockchain2025 для configtxgen.
+Organizations:
+  - &OrdererOrg
+    Name: OrdererOrg
+    ID: OrdererMSP
+    MSPDir: /work/crypto/ordererOrganizations/orderer.example.com/msp
+    Policies:
+      Readers: {Type: Signature, Rule: "OR('OrdererMSP.member')"}
+      Writers: {Type: Signature, Rule: "OR('OrdererMSP.member')"}
+      Admins:  {Type: Signature, Rule: "OR('OrdererMSP.admin')"}
+    OrdererEndpoints:
+      - orderer.orderer.example.com:7050
+
+  - &Bank
+    Name: Bank
+    ID: BankMSP
+    MSPDir: /work/crypto/peerOrganizations/bank.example.com/msp
+    Policies:
+      Readers: {Type: Signature, Rule: "OR('BankMSP.admin','BankMSP.peer','BankMSP.client')"}
+      Writers: {Type: Signature, Rule: "OR('BankMSP.admin','BankMSP.client')"}
+      Admins:  {Type: Signature, Rule: "OR('BankMSP.admin')"}
+      Endorsement: {Type: Signature, Rule: "OR('BankMSP.peer')"}
+    # Якорный пир нужен, чтобы организации находили друг друга (gossip и discovery).
+    AnchorPeers:
+      - {Host: peer0.bank.example.com, Port: 7051}
+
+  - &Users
+    Name: Users
+    ID: UsersMSP
+    MSPDir: /work/crypto/peerOrganizations/users.example.com/msp
+    Policies:
+      Readers: {Type: Signature, Rule: "OR('UsersMSP.admin','UsersMSP.peer','UsersMSP.client')"}
+      Writers: {Type: Signature, Rule: "OR('UsersMSP.admin','UsersMSP.client')"}
+      Admins:  {Type: Signature, Rule: "OR('UsersMSP.admin')"}
+      Endorsement: {Type: Signature, Rule: "OR('UsersMSP.peer')"}
+    AnchorPeers:
+      - {Host: peer0.users.example.com, Port: 9051}
+
+Capabilities:
+  Channel: &ChannelCapabilities {V2_0: true}
+  Orderer: &OrdererCapabilities {V2_0: true}
+  Application: &ApplicationCapabilities {V2_5: true}
+
+Application: &ApplicationDefaults
+  Organizations:
+  Policies:
+    Readers: {Type: ImplicitMeta, Rule: "ANY Readers"}
+    Writers: {Type: ImplicitMeta, Rule: "ANY Writers"}
+    Admins:  {Type: ImplicitMeta, Rule: "MAJORITY Admins"}
+    LifecycleEndorsement: {Type: ImplicitMeta, Rule: "MAJORITY Endorsement"}
+    Endorsement: {Type: ImplicitMeta, Rule: "MAJORITY Endorsement"}
+  Capabilities: *ApplicationCapabilities
+
+Orderer: &OrdererDefaults
+  OrdererType: etcdraft
+  Addresses:
+    - orderer.orderer.example.com:7050
+  EtcdRaft:
+    Consenters:
+      - Host: orderer.orderer.example.com
+        Port: 7050
+        ClientTLSCert: /work/crypto/ordererOrganizations/orderer.example.com/orderers/orderer.orderer.example.com/tls/server.crt
+        ServerTLSCert: /work/crypto/ordererOrganizations/orderer.example.com/orderers/orderer.orderer.example.com/tls/server.crt
+  BatchTimeout: 1s
+  BatchSize:
+    MaxMessageCount: 10
+    AbsoluteMaxBytes: 99 MB
+    PreferredMaxBytes: 512 KB
+  Organizations:
+  Policies:
+    Readers: {Type: ImplicitMeta, Rule: "ANY Readers"}
+    Writers: {Type: ImplicitMeta, Rule: "ANY Writers"}
+    Admins:  {Type: ImplicitMeta, Rule: "MAJORITY Admins"}
+    BlockValidation: {Type: ImplicitMeta, Rule: "ANY Writers"}
+  Capabilities: *OrdererCapabilities
+
+Channel: &ChannelDefaults
+  Policies:
+    Readers: {Type: ImplicitMeta, Rule: "ANY Readers"}
+    Writers: {Type: ImplicitMeta, Rule: "ANY Writers"}
+    Admins:  {Type: ImplicitMeta, Rule: "MAJORITY Admins"}
+  Capabilities: *ChannelCapabilities
+
+Profiles:
+  TrafficChannel:
+    <<: *ChannelDefaults
+    Orderer:
+      <<: *OrdererDefaults
+      Organizations:
+        - *OrdererOrg
+    Application:
+      <<: *ApplicationDefaults
+      Organizations:
+        - *Bank
+        - *Users

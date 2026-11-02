@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Полный запуск решения. Сеть создаётся заново, все данные прошлого запуска удаляются.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+./scripts/network.sh down >/dev/null 2>&1 || true
+./scripts/network.sh up
+./scripts/deploy.sh
+(cd api && npm install --no-audit --no-fund && node seed.js)
+cd api && exec node server.js
