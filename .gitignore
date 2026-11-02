@@ -6,3 +6,7 @@ network/channel-artifacts/
 .DS_Store
 # Текст конкурсного задания в репозиторий не входит
 *.docx
+fabric-samples/
+install-fabric.sh
+.gradle/
+build/

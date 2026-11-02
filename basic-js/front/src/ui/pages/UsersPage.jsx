@@ -1,44 +1,37 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAuth } from '../../core/context/AuthContext';
-import { ErrorMessage } from '../components/ErrorMessage';
-import { UsersTable } from '../components/UsersTable';
 
 export function UsersPage() {
-  const { request } = useAuth();
+  const { evaluate, submit } = useAuth();
   const [users, setUsers] = useState([]);
-  const [busyName, setBusyName] = useState(null);
-  const [error, setError] = useState('');
-
-  const load = useCallback(async () => {
-    const all = await request('GET', '/api/users');
-    setUsers(all.filter((user) => user.role !== 'admin'));
-  }, [request]);
+  const load = () => evaluate('GetUsers').then(setUsers);
 
   useEffect(() => {
-    load().catch((err) => setError(err.message));
-    const timer = setInterval(() => load().catch(() => {}), 3000);
-    return () => clearInterval(timer);
-  }, [load]);
+    load();
+  }, []);
 
   async function toggle(user) {
-    setBusyName(user.name);
-    setError('');
-    try {
-      const action = user.status === 'blocked' ? 'unblock' : 'block';
-      await request('POST', `/api/users/${encodeURIComponent(user.name)}/${action}`);
-      await load();
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setBusyName(null);
-    }
+    await submit(user.status === 'blocked' ? 'UnblockUser' : 'BlockUser', user.name);
+    await load();
   }
 
   return (
     <section className="card">
       <h2>Пользователи</h2>
-      <ErrorMessage text={error} />
-      <UsersTable users={users} busyName={busyName} onToggle={toggle} />
+      <table>
+        <tbody>
+          {users.map((user) => (
+            <tr key={user.name}>
+              <td>{user.name}</td>
+              <td>{user.address}</td>
+              <td className={user.status}>{user.status === 'blocked' ? 'Заблокирован' : 'Активен'}</td>
+              <td>
+                <button onClick={() => toggle(user)}>{user.status === 'blocked' ? 'Разблокировать' : 'Заблокировать'}</button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </section>
   );
 }

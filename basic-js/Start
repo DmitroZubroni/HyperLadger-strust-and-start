@@ -1,54 +1,15 @@
 #!/usr/bin/env bash
-# Запуск всего решения. Данные прошлого запуска удаляются вместе с контейнером.
+# Запуск решения: сеть, контракт, API (порт 8091), интерфейс (порт 3005)
 set -e
+trap "kill 0" EXIT
 cd "$(dirname "$0")"
-FRONT_PORT="${FRONT_PORT:-3005}"
+ROOT=$PWD
 
-if (exec 3<>"/dev/tcp/127.0.0.1/$FRONT_PORT") 2>/dev/null; then
-  echo "Порт $FRONT_PORT занят. Освободите его или запустите так: FRONT_PORT=3105 ./Start"
-  exit 1
-fi
+cd ../fabric-samples/test-network
+./network.sh down
+./network.sh up createChannel -ca
+./network.sh deployCC -ccn users -ccp "$ROOT/contract" -ccl javascript
 
-# 1. Нода: один контейнер с пирами, ордерером и CA, организациями и каналом
-docker rm -f chat-node >/dev/null 2>&1 || true
-docker run -d --name chat-node -p 8090:8090 -e MICROFAB_CONFIG='{
-  "port": 9000,
-  "endorsing_organizations": [{"name": "Admins"}, {"name": "Users"}],
-  "channels": [{"name": "chatchannel", "endorsing_organizations": ["Admins", "Users"]}],
-  "capability_level": "V2_5",
-  "certificate_authorities": true
-}' ghcr.io/hyperledger-labs/microfab:latest
-until docker logs chat-node 2>&1 | grep -q 'Microfab started'; do sleep 1; done
-
-# Копия backend внутрь контейнера: так не возникает проблем с правами на Linux и WSL
-copy_backend() {
-  tar -c --exclude=node_modules --exclude=target -C backend . | \
-    docker exec -i chat-node sh -c 'mkdir -p /tmp/app && tar -x -C /tmp/app'
-}
-copy_backend
-
-# 2. Деплой контракта: упаковка, установка и одобрение в каждой организации, коммит
-HOST=127-0-0-1.nip.io:9000
-peer() {  # peer <admins|users> <MSP> <аргументы>
-  docker exec -e CORE_PEER_LOCALMSPID="$2" -e CORE_PEER_ADDRESS="$1peer-api.$HOST" \
-    -e CORE_PEER_MSPCONFIGPATH="/home/microfab/data/admin-$1" chat-node peer "${@:3}"
-}
-LABEL=chat_1 VERSION=1 SEQUENCE=1
-deploy_org() {  # deploy_org <admins|users> <MSP>
-  peer "$1" "$2" lifecycle chaincode install "/tmp/$LABEL.tgz"
-  ID=$(peer "$1" "$2" lifecycle chaincode queryinstalled | sed -n "s/^Package ID: \($LABEL:[^,]*\), Label.*/\1/p")
-  peer "$1" "$2" lifecycle chaincode approveformyorg -o "orderer-api.$HOST" -C chatchannel \
-    -n chat -v "$VERSION" --sequence "$SEQUENCE" --package-id "$ID"
-}
-peer admins AdminsMSP lifecycle chaincode package "/tmp/$LABEL.tgz" --path /tmp/app --lang node --label "$LABEL"
-deploy_org admins AdminsMSP
-deploy_org users UsersMSP
-peer admins AdminsMSP lifecycle chaincode commit -o "orderer-api.$HOST" -C chatchannel -n chat -v "$VERSION" --sequence "$SEQUENCE" \
-  --peerAddresses "adminspeer-api.$HOST" --peerAddresses "userspeer-api.$HOST"
-
-# 3. Интерфейс на компьютере, API в контейнере рядом с контрактом
-(cd front && npm install --no-audit --no-fund)
-(cd front && exec npx vite --host --port "$FRONT_PORT" --strictPort) &
-trap 'kill $!' EXIT
-docker exec -w /tmp/app chat-node npm install --no-audit --no-fund
-docker exec -w /tmp/app chat-node node api.js
+cd "$ROOT/api" && npm install
+node server.js &
+cd "$ROOT/front" && npm install && npx vite --host --port 3005
