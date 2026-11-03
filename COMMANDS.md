@@ -1,6 +1,6 @@
 # Команды Hyperledger Fabric
 
-Шпаргалка для сети `test-network`. Все команды выполняются из папки `fabric-samples/test-network`, если не сказано другое.
+Шпаргалка для локальной сети `test-network`, Fabric 2.5. Все команды выполняются из папки `fabric-samples/test-network`, если не сказано другое.
 
 ## Подготовка терминала
 
@@ -10,8 +10,8 @@
 cd fabric-samples/test-network
 export PATH=$PWD/../bin:$PATH FABRIC_CFG_PATH=$PWD/../config CORE_PEER_TLS_ENABLED=true
 export ORDERER_CA=$PWD/organizations/ordererOrganizations/example.com/tlsca/tlsca.example.com-cert.pem
-export ORG1_TLS=$PWD/organizations/peerOrganizations/org1.example.com/tlsca/tlsca.org1.example.com-cert.pem
-export ORG2_TLS=$PWD/organizations/peerOrganizations/org2.example.com/tlsca/tlsca.org2.example.com-cert.pem
+export ORG1_TLS=$PWD/organizations/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt
+export ORG2_TLS=$PWD/organizations/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt
 
 # Работать от имени администратора организации: as_org1 или as_org2
 as_org1() {
@@ -132,7 +132,7 @@ as_org2
 fabric-ca-client revoke --caname ca-org2 -e ivan -r cessationofoperation --gencrl --tls.certfiles $CA_CERT
 ```
 
-После `revoke` сеть не начнёт отклонять сертификат сразу: для этого список отозванных сертификатов нужно добавить в конфигурацию канала. Обновлять её в этом файле не показано.
+После `revoke` сеть не начнёт отклонять сертификат сразу. Список отозванных сертификатов (`crl.pem`) нужно добавить в папку `crls` локальных MSP пиров и в MSP конфигурации канала. Этих шагов в файле нет.
 
 ## Новая организация
 
@@ -156,7 +156,7 @@ CA новой организации работает на порту `11054`, �
 
 ## Смена имён организаций
 
-В `network.sh` имён организаций нет в параметрах, поэтому делается копия сети с заменой имён в её файлах. Команды выполняются из папки `fabric-samples`, старая сеть должна быть остановлена. Пример: Org1 → Bank, Org2 → Users. Имя пишется латиницей и начинается с заглавной буквы, короткое имя тем же словом строчными буквами.
+В `network.sh` нет параметра с именем организации, поэтому делается копия сети с заменой имён в её файлах. Документация Fabric не рекомендует менять скрипты тестовой сети, так как это может её сломать, поэтому оригинал остаётся нетронутым. Набор ниже я проверил на Fabric 2.5.16; при другой версии проверьте заново. Команды выполняются из папки `fabric-samples`, старая сеть должна быть остановлена. Пример: Org1 → Bank, Org2 → Users. Имя пишется латиницей и начинается с заглавной буквы, короткое имя тем же словом строчными буквами.
 
 ```bash
 A=Bank; a=bank; B=Users; b=users; NET=test-network-$a
@@ -180,4 +180,4 @@ LC_ALL=C grep -rIlE '[oO]rg[12]' network.sh setOrgEnv.sh organizations/ccp-gener
 
 После этого MSP называются `BankMSP` и `UsersMSP`, а файлы лежат в `organizations/peerOrganizations/bank.example.com`. Дальше работайте из этой новой папки.
 
-Вместе с именами поменяйте их в своём коде: константы `Org1MSP` и `Org2MSP` в контракте, а в API пути, имена CA (`ca-bank`) и подразделения. Подразделения `org1.department1` заменятся на `bank.department1`. Скрипт `addOrg3` в такой копии не обновлён, новую организацию в ней он не добавит.
+Вместе с именами поменяйте их в своём коде: константы `Org1MSP` и `Org2MSP` в контракте, а в API пути, имена CA (`ca-bank`), адрес пира (`peer0.bank.example.com`) и подразделения (`bank.department1`). Скрипт `addOrg3` в такой копии не обновлён, новую организацию в ней он не добавит.

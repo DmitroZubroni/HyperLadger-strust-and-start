@@ -10,27 +10,39 @@
 
 ## 1. Установка
 
-Нужны Docker, JDK 17, Node.js 18+ (для интерфейса), curl и jq.
+Нужны Git, cURL, jq, Docker, JDK 17 и Node.js 22.12 или новее (для интерфейса).
+
+**Ubuntu (компьютер или виртуальная машина):**
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y curl jq openjdk-17-jdk
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt-get install -y git curl jq docker-compose
+sudo systemctl start docker
+sudo usermod -a -G docker $USER      # затем выйдите из системы и войдите снова
+sudo apt-get install -y openjdk-17-jdk
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt-get install -y nodejs
 ```
 
-- **Ubuntu:** `sudo apt-get install -y docker.io docker-compose-v2`, затем `sudo usermod -aG docker $USER` и войдите в систему заново.
-- **WSL:** установите Docker Desktop и включите Settings → Resources → WSL Integration для Ubuntu. Проект храните в `~/projects`, а не в `/mnt/c`.
+**Windows с WSL 2:**
 
-Fabric ставится в корень репозитория, рядом с папкой `basic-java`. Скачивается несколько гигабайт.
+1. Установите Docker Desktop и WSL 2 с Ubuntu.
+2. Включите в Docker Desktop: Settings → Resources → WSL Integration для Ubuntu.
+3. В терминале Ubuntu выполните команды выше, кроме установки Docker: `git curl jq` вместо `git curl jq docker-compose` и без `systemctl` и `usermod`.
+4. Проект храните в файловой системе Ubuntu, например в `~/projects`, а не в `/mnt/c`.
+
+Fabric ставится официальным скриптом в корень репозитория, рядом с папкой `basic-java`. Скрипт скачивает образы Docker, утилиты в `fabric-samples/bin` и примеры. Это несколько гигабайт. По умолчанию ставятся Fabric 2.5.16 и Fabric CA 1.5.17.
 
 ```bash
-git clone git@github.com:DmitroZubroni/HyperLadger-strust-and-start.git
+git clone https://github.com/DmitroZubroni/HyperLadger-strust-and-start.git
 cd HyperLadger-strust-and-start
 curl -sSLO https://raw.githubusercontent.com/hyperledger/fabric/main/scripts/install-fabric.sh
 chmod +x install-fabric.sh
-./install-fabric.sh docker binary samples
+./install-fabric.sh docker samples binary
+docker pull hyperledger/fabric-javaenv:2.5
 ```
+
+Образ `fabric-javaenv` пир использует для запуска контракта. Скрипт установки его не скачивает, поэтому без этой команды образ загрузится при первом деплое.
 
 ## 2. Быстрый запуск
 
@@ -49,7 +61,7 @@ cd fabric-samples/test-network
 ./network.sh up createChannel -ca
 ```
 
-Команда поднимает две организации, ордерер, центры сертификации (флаг `-ca`) и канал `mychannel`.
+Команда поднимает две организации, ордерер, центры сертификации (флаг `-ca`) и канал `mychannel`. Это тестовая сеть из документации Fabric: она предназначена для обучения и проверки на своём компьютере, а не для промышленного использования.
 
 ## 4. Смарт-контракт
 
@@ -92,6 +104,8 @@ cd basic-java/backend
 
 Токен передаётся в заголовке `Authorization`. Новый метод контракта сразу доступен через эти маршруты, менять API не нужно.
 
+Контракт вызывается через Fabric Gateway, официальный клиент для Fabric 2.4 и новее. Клиент открывает gRPC-соединение с пиром своей организации, а пир сам собирает одобрения других организаций. Старые `fabric-network` и `fabric-gateway-java` устарели, их репозитории в архиве, поэтому здесь они не используются.
+
 ```bash
 TOKEN=$(curl -s -X POST localhost:8091/login -H 'Content-Type: application/json' \
   -d '{"name":"admin","password":"adminpw"}' | jq -r .token)
@@ -123,13 +137,13 @@ front/src/
 | Org1 | Администратор `admin` | Создаётся вместе с сетью |
 | Org2 | Пользователи | Регистрируются сами через `/register` |
 
-Пользователь сети — это сертификат и закрытый ключ. Регистрация идёт в три шага:
+Пользователь сети — это сертификат и закрытый ключ. API работает с CA через официальную утилиту `fabric-samples/bin/fabric-ca-client`. Регистрация идёт в три шага:
 
-1. Администратор CA организации Org2 создаёт учётную запись: `register`.
-2. Пользователь получает сертификат: `enroll`. При неверном пароле CA вернёт ошибку, поэтому пароль проверяет сам CA.
+1. Администратор CA организации Org2 создаёт учётную запись: `fabric-ca-client register`.
+2. Пользователь получает сертификат: `fabric-ca-client enroll`. При неверном пароле CA вернёт ошибку, поэтому пароль проверяет сам CA.
 3. Пользователь вызывает `RegisterUser`, и его запись появляется в реестре.
 
-Сертификаты и ключи API хранит в памяти, поэтому после его перезапуска нужно войти снова.
+Сертификаты и ключи API хранит в памяти, поэтому после его перезапуска нужно войти снова. Пароль передаётся утилите в командной строке: для учебной сети это допустимо, но на общем сервере его могут увидеть другие пользователи системы.
 
 Блокировка меняет статус в контракте и не отзывает сертификат: заблокированный может войти и посмотреть данные, но `UpdateAddress` ему откажет. Имя менять нельзя: оно записано в сертификате.
 
@@ -161,7 +175,8 @@ user:ivan = {"name":"ivan","address":"Москва","status":"active"}
 | --- | --- | --- |
 | `port is already allocated` | Порт занят другим контейнером | Остановите его или выполните `./network.sh down` |
 | `permission denied` у `docker` | Пользователь не в группе `docker` | `sudo usermod -aG docker $USER`, затем войдите заново |
-| `Cannot find module .../connection-org1.json` | Сеть не поднята | Выполните шаг 3 |
+| `ENOENT` с путём к `organizations` | Сеть не поднята | Выполните шаг 3 |
 | `access denied` или `creator org unknown` после перезапуска сети | Старый сертификат | Перезапустите API и войдите снова |
+| Ошибка `nodeenv` или `javaenv` при деплое | Образ не скачался | Выполните `docker pull` из раздела 1 |
 | `JAVA_HOME` или `java: command not found` | Не установлен JDK | `sudo apt-get install -y openjdk-17-jdk` |
 | `$'\r': command not found` | Окончания строк Windows | Клонируйте репозиторий внутри Ubuntu |

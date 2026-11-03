@@ -16,8 +16,12 @@ dependencies {
     implementation 'org.hyperledger.fabric-chaincode-java:fabric-chaincode-shim:2.5.+'
     implementation 'com.owlike:genson:1.6'
 
-    apiImplementation 'org.springframework.boot:spring-boot-starter-web:3.3.13'
-    apiImplementation 'org.hyperledger.fabric:fabric-gateway-java:2.2.9'
+    apiImplementation 'org.springframework.boot:spring-boot-starter-web:3.5.16'
+    apiImplementation 'org.hyperledger.fabric:fabric-gateway:1.13.0'
+    apiImplementation platform('com.google.protobuf:protobuf-bom:4.36.2')
+    apiImplementation platform('io.grpc:grpc-bom:1.84.0')
+    apiImplementation 'io.grpc:grpc-api'
+    apiRuntimeOnly 'io.grpc:grpc-netty-shaded'
 }
 
 tasks.withType(JavaCompile) {

@@ -1,23 +1,27 @@
 package users;
 
+import io.grpc.Grpc;
+import io.grpc.ManagedChannel;
+import io.grpc.TlsChannelCredentials;
+import java.io.File;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.PrivateKey;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
-import java.util.Properties;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import org.hyperledger.fabric.gateway.Contract;
-import org.hyperledger.fabric.gateway.Gateway;
-import org.hyperledger.fabric.gateway.Identities;
-import org.hyperledger.fabric.gateway.Wallet;
-import org.hyperledger.fabric.gateway.Wallets;
-import org.hyperledger.fabric.sdk.Enrollment;
-import org.hyperledger.fabric.sdk.User;
-import org.hyperledger.fabric.sdk.security.CryptoSuite;
-import org.hyperledger.fabric_ca.sdk.HFCAClient;
-import org.hyperledger.fabric_ca.sdk.RegistrationRequest;
+import org.hyperledger.fabric.client.Contract;
+import org.hyperledger.fabric.client.Gateway;
+import org.hyperledger.fabric.client.GatewayException;
+import org.hyperledger.fabric.client.Hash;
+import org.hyperledger.fabric.client.identity.Identities;
+import org.hyperledger.fabric.client.identity.Signers;
+import org.hyperledger.fabric.client.identity.X509Identity;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.http.ResponseEntity;
@@ -33,77 +37,86 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @CrossOrigin
 public class Application {
-    private static final Path NETWORK = Path.of("../../fabric-samples/test-network/organizations");
+    private static final Path SAMPLES = Path.of("../../fabric-samples").toAbsolutePath().normalize();
+    private static final Path NETWORK = SAMPLES.resolve("test-network/organizations");
 
-    private record Org(String id, String msp, String caUrl) {
-        Path profile() {
-            return NETWORK.resolve("peerOrganizations/" + id + ".example.com/connection-" + id + ".json");
+    private record Org(String id, String msp, String peer, int caPort) {
+        Path dir() {
+            return NETWORK.resolve("peerOrganizations/" + id + ".example.com");
         }
     }
 
-    private record Session(Org org, String name) {
+    private record Session(Org org, String certificate, PrivateKey key) {
     }
 
-    private static final Org ADMINS = new Org("org1", "Org1MSP", "https://localhost:7054");   // администратор
-    private static final Org USERS = new Org("org2", "Org2MSP", "https://localhost:8054");    // пользователи
+    private static final Org ADMINS = new Org("org1", "Org1MSP", "localhost:7051", 7054);   // администратор
+    private static final Org USERS = new Org("org2", "Org2MSP", "localhost:9051", 8054);    // пользователи
 
-    private final Wallet wallet = Wallets.newInMemoryWallet();      // сертификаты и ключи вошедших пользователей
     private final Map<String, Session> sessions = new ConcurrentHashMap<>();
-
-    public Application() throws Exception {
-    }
+    private final Map<String, ManagedChannel> channels = new ConcurrentHashMap<>();
 
     public static void main(String[] args) {
-        System.setProperty("org.hyperledger.fabric.sdk.service_discovery.as_localhost", "true");
         SpringApplication.run(Application.class, args);
     }
 
-    private HFCAClient ca(Org org) throws Exception {
-        Properties props = new Properties();
-        props.put("pemFile", NETWORK.resolve("fabric-ca/" + org.id() + "/ca-cert.pem").toString());
-        props.put("allowAllHostNames", "true");
-        HFCAClient client = HFCAClient.createNewInstance("ca-" + org.id(), org.caUrl(), props);
-        client.setCryptoSuite(CryptoSuite.Factory.getCryptoSuite());
-        return client;
+    // --- Пользователи: официальная утилита fabric-ca-client ---
+
+    // Команда выполняется от имени администратора CA организации
+    private void caCommand(Org org, String... args) throws Exception {
+        List<String> command = new ArrayList<>(List.of(SAMPLES.resolve("bin/fabric-ca-client").toString()));
+        command.addAll(List.of(args));
+        command.addAll(List.of("--caname", "ca-" + org.id(),
+                "--tls.certfiles", NETWORK.resolve("fabric-ca/" + org.id() + "/ca-cert.pem").toString()));
+        ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(true);
+        builder.redirectOutput(ProcessBuilder.Redirect.DISCARD);
+        builder.environment().put("FABRIC_CA_CLIENT_HOME", org.dir().toString());
+        if (builder.start().waitFor() != 0) {
+            throw new Exception("Ошибка CA");     // текст утилиты содержит пароль, клиенту его не отдаём
+        }
     }
 
     // Выпуск сертификата. При неверном пароле CA вернёт ошибку: это и есть проверка входа
-    private Enrollment enroll(Org org, String name, String password) throws Exception {
-        Enrollment enrollment = ca(org).enroll(name, password);
-        wallet.put(org.id() + ":" + name, Identities.newX509Identity(org.msp(), enrollment));
-        return enrollment;
-    }
-
-    // Новый пользователь в CA организации: его регистрирует admin этой организации
-    private void register(String name, String password) throws Exception {
-        Enrollment adminEnrollment = enroll(USERS, "admin", "adminpw");
-        User admin = new User() {
-            @Override public String getName() { return "admin"; }
-            @Override public Set<String> getRoles() { return Set.of(); }
-            @Override public String getAccount() { return ""; }
-            @Override public String getAffiliation() { return "org2.department1"; }
-            @Override public Enrollment getEnrollment() { return adminEnrollment; }
-            @Override public String getMspId() { return USERS.msp(); }
-        };
-        RegistrationRequest request = new RegistrationRequest(name, "org2.department1");
-        request.setSecret(password);
-        request.setType("client");
-        request.setMaxEnrollments(-1);
+    private Session enroll(Org org, String name, String password) throws Exception {
+        Path dir = Files.createTempDirectory("enroll-");
         try {
-            ca(USERS).register(request, admin);
-        } catch (Exception e) {
-            // Текст ошибки библиотеки содержит пароль, клиенту его не отдаём
-            throw new Exception("Не удалось зарегистрировать: имя занято или недопустимо");
+            String url = "https://" + URLEncoder.encode(name, StandardCharsets.UTF_8) + ":"
+                    + URLEncoder.encode(password, StandardCharsets.UTF_8) + "@localhost:" + org.caPort();
+            caCommand(org, "enroll", "-u", url, "-M", dir.toString());
+            try (var keys = Files.list(dir.resolve("keystore"))) {
+                String certificate = Files.readString(dir.resolve("signcerts/cert.pem"));
+                PrivateKey key = Identities.readPrivateKey(Files.readString(keys.findFirst().orElseThrow()));
+                return new Session(org, certificate, key);
+            }
+        } finally {
+            try (var files = Files.walk(dir)) {
+                files.sorted(Comparator.reverseOrder()).map(Path::toFile).forEach(File::delete);
+            }
         }
-        enroll(USERS, name, password);
     }
 
-    // Вызов любого метода контракта от имени пользователя
+    // --- Контракт: Fabric Gateway ---
+
+    // Одно gRPC-соединение на организацию: так советует документация Fabric
+    private ManagedChannel channel(Org org) {
+        return channels.computeIfAbsent(org.id(), id -> {
+            File tlsCert = org.dir().resolve("tlsca/tlsca." + id + ".example.com-cert.pem").toFile();
+            try {
+                return Grpc.newChannelBuilder(org.peer(), TlsChannelCredentials.newBuilder().trustManager(tlsCert).build())
+                        .overrideAuthority("peer0." + id + ".example.com")
+                        .build();
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        });
+    }
+
+    // Вызов любого метода контракта от имени пользователя: evaluate читает, submit записывает в блок
     private String call(String kind, Session user, String method, List<String> args) throws Exception {
-        try (Gateway gateway = Gateway.createBuilder()
-                .identity(wallet, user.org().id() + ":" + user.name())
-                .networkConfig(user.org().profile())
-                .discovery(true)
+        try (Gateway gateway = Gateway.newInstance()
+                .identity(new X509Identity(user.org().msp(), Identities.readX509Certificate(user.certificate())))
+                .signer(Signers.newPrivateKeySigner(user.key()))
+                .hash(Hash.SHA256)
+                .connection(channel(user.org()))
                 .connect()) {
             Contract contract = gateway.getNetwork("mychannel").getContract("users");
             String[] params = args.toArray(new String[0]);
@@ -114,27 +127,34 @@ public class Application {
         }
     }
 
-    private Map<String, String> openSession(Org org, String name) {
+    // --- REST API ---
+
+    private Map<String, String> openSession(Session user) {
         String token = UUID.randomUUID().toString();
-        sessions.put(token, new Session(org, name));
+        sessions.put(token, user);
         return Map.of("token", token);
     }
 
     @PostMapping("/register")
     public Map<String, String> register(@RequestBody Map<String, String> body) throws Exception {
         String name = body.get("name");
-        register(name, body.get("password"));
-        call("submit", new Session(USERS, name), "RegisterUser", List.of(body.get("address")));
-        return openSession(USERS, name);
+        String password = body.get("password");
+        try {
+            caCommand(USERS, "register", "--id.name", name, "--id.secret", password,
+                    "--id.type", "client", "--id.affiliation", "org2.department1");
+        } catch (Exception e) {
+            throw new Exception("Не удалось зарегистрировать: имя занято или недопустимо");
+        }
+        Session user = enroll(USERS, name, password);
+        call("submit", user, "RegisterUser", List.of(body.get("address")));
+        return openSession(user);
     }
 
     @PostMapping("/login")
     public Map<String, String> login(@RequestBody Map<String, String> body) throws Exception {
-        String name = body.get("name");
         for (Org org : List.of(ADMINS, USERS)) {
             try {
-                enroll(org, name, body.get("password"));
-                return openSession(org, name);
+                return openSession(enroll(org, body.get("name"), body.get("password")));
             } catch (Exception e) {
                 // Следующая организация
             }
@@ -142,7 +162,7 @@ public class Application {
         throw new Exception("Неверное имя или пароль");
     }
 
-    // Один маршрут на все методы контракта: evaluate читает, submit записывает в блок
+    // Один маршрут на все методы контракта
     @PostMapping(value = "/{kind:evaluate|submit}/{method}", produces = "application/json")
     public String contract(@PathVariable String kind, @PathVariable String method,
                            @RequestHeader(value = "Authorization", required = false) String token,
@@ -156,6 +176,9 @@ public class Application {
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<Map<String, String>> error(Exception e) {
-        return ResponseEntity.badRequest().body(Map.of("error", String.valueOf(e.getMessage())));
+        String message = e instanceof GatewayException gateway && !gateway.getDetails().isEmpty()
+                ? gateway.getDetails().get(0).getMessage().replaceFirst("^.*?chaincode response \\d+, ", "")
+                : String.valueOf(e.getMessage());
+        return ResponseEntity.badRequest().body(Map.of("error", message));
     }
 }

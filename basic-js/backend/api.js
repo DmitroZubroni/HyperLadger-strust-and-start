@@ -1,67 +1,91 @@
 'use strict';
 const crypto = require('node:crypto');
+const { execFile } = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
+const { promisify } = require('node:util');
 const cors = require('cors');
 const express = require('express');
-const FabricCAServices = require('fabric-ca-client');
-const { Gateway, Wallets } = require('fabric-network');
+const grpc = require('@grpc/grpc-js');
+const { connect, hash, signers } = require('@hyperledger/fabric-gateway');
 
-const NETWORK = path.resolve(__dirname, '../../fabric-samples/test-network/organizations/peerOrganizations');
+const SAMPLES = path.resolve(__dirname, '../../fabric-samples');
+const NETWORK = `${SAMPLES}/test-network/organizations`;
 const ORGS = {
-    org1: { msp: 'Org1MSP', ccp: require(`${NETWORK}/org1.example.com/connection-org1.json`) },   // администратор
-    org2: { msp: 'Org2MSP', ccp: require(`${NETWORK}/org2.example.com/connection-org2.json`) },   // пользователи
+    org1: { msp: 'Org1MSP', peer: 'localhost:7051', caPort: 7054 },   // администратор
+    org2: { msp: 'Org2MSP', peer: 'localhost:9051', caPort: 8054 },   // пользователи
 };
-const sessions = new Map();                     // токен -> { org, name }
-const walletPromise = Wallets.newInMemoryWallet();   // сертификаты и ключи вошедших пользователей
+const sessions = new Map();     // токен -> { org, name, certificate, key }
 
-function caClient(org) {
-    const ca = ORGS[org].ccp.certificateAuthorities[`ca.${org}.example.com`];
-    return new FabricCAServices(ca.url, { trustedRoots: ca.tlsCACerts.pem, verify: false }, ca.caName);
+// --- Пользователи: официальная утилита fabric-ca-client ---
+
+// Команда выполняется от имени администратора CA организации
+function caCommand(org, args) {
+    return promisify(execFile)(`${SAMPLES}/bin/fabric-ca-client`,
+        [...args, '--caname', `ca-${org}`, '--tls.certfiles', `${NETWORK}/fabric-ca/${org}/ca-cert.pem`],
+        { env: { ...process.env, FABRIC_CA_CLIENT_HOME: `${NETWORK}/peerOrganizations/${org}.example.com` } });
+}
+
+function register(name, password) {
+    return caCommand('org2', ['register', '--id.name', name, '--id.secret', password,
+        '--id.type', 'client', '--id.affiliation', 'org2.department1']);
 }
 
 // Выпуск сертификата. При неверном пароле CA вернёт ошибку: это и есть проверка входа
 async function enroll(org, name, password) {
-    const { certificate, key } = await caClient(org).enroll({ enrollmentID: name, enrollmentSecret: password });
-    const wallet = await walletPromise;
-    await wallet.put(`${org}:${name}`, {
-        credentials: { certificate, privateKey: key.toBytes() },
-        mspId: ORGS[org].msp,
-        type: 'X.509',
-    });
-}
-
-// Новый пользователь в CA организации: его регистрирует admin этой организации
-async function register(name, password) {
-    await enroll('org2', 'admin', 'adminpw');
-    const wallet = await walletPromise;
-    const identity = await wallet.get('org2:admin');
-    const admin = await wallet.getProviderRegistry().getProvider(identity.type).getUserContext(identity, 'admin');
-    await caClient('org2').register({
-        enrollmentID: name, enrollmentSecret: password, role: 'client', affiliation: 'org2.department1', maxEnrollments: -1,
-    }, admin);
-    await enroll('org2', name, password);
-}
-
-// Вызов любого метода контракта от имени пользователя
-async function callContract(kind, { org, name }, method, args) {
-    const gateway = new Gateway();
-    await gateway.connect(ORGS[org].ccp, {
-        wallet: await walletPromise,
-        identity: `${org}:${name}`,
-        discovery: { enabled: true, asLocalhost: true },
-    });
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'enroll-'));
     try {
-        const contract = (await gateway.getNetwork('mychannel')).getContract('users');
-        const result = kind === 'submit' ? await contract.submitTransaction(method, ...args) : await contract.evaluateTransaction(method, ...args);
-        return JSON.parse(result.toString());
+        const url = `https://${encodeURIComponent(name)}:${encodeURIComponent(password)}@localhost:${ORGS[org].caPort}`;
+        await caCommand(org, ['enroll', '-u', url, '-M', dir]);
+        const keyFile = fs.readdirSync(`${dir}/keystore`)[0];
+        return {
+            org,
+            name,
+            certificate: fs.readFileSync(`${dir}/signcerts/cert.pem`),
+            key: crypto.createPrivateKey(fs.readFileSync(`${dir}/keystore/${keyFile}`)),
+        };
     } finally {
-        gateway.disconnect();
+        fs.rmSync(dir, { recursive: true });
     }
 }
 
-function openSession(org, name) {
+// --- Контракт: Fabric Gateway ---
+
+// Одно gRPC-соединение на организацию: так советует документация Fabric
+const clients = {};
+function grpcClient(org) {
+    if (!clients[org]) {
+        const tlsCert = fs.readFileSync(`${NETWORK}/peerOrganizations/${org}.example.com/tlsca/tlsca.${org}.example.com-cert.pem`);
+        clients[org] = new grpc.Client(ORGS[org].peer, grpc.credentials.createSsl(tlsCert), {
+            'grpc.ssl_target_name_override': `peer0.${org}.example.com`,
+        });
+    }
+    return clients[org];
+}
+
+// Вызов любого метода контракта от имени пользователя: evaluate читает, submit записывает в блок
+async function callContract(kind, user, method, args) {
+    const gateway = connect({
+        client: grpcClient(user.org),
+        identity: { mspId: ORGS[user.org].msp, credentials: user.certificate },
+        signer: signers.newPrivateKeySigner(user.key),
+        hash: hash.SHA256,
+    });
+    try {
+        const contract = gateway.getNetwork('mychannel').getContract('users');
+        const call = kind === 'submit' ? contract.submitTransaction(method, ...args) : contract.evaluateTransaction(method, ...args);
+        return JSON.parse(Buffer.from(await call).toString());
+    } finally {
+        gateway.close();
+    }
+}
+
+// --- REST API ---
+
+function openSession(user) {
     const token = crypto.randomUUID();
-    sessions.set(token, { org, name });
+    sessions.set(token, user);
     return { token };
 }
 
@@ -70,30 +94,29 @@ app.use(cors());
 app.use(express.json());
 
 const route = (handler) => (req, res) => handler(req).then((data) => res.json(data)).catch((err) => {
-    res.status(400).json({ error: /message=(.*)/.exec(err.message)?.[1] || err.message });   // текст ошибки контракта
+    res.status(400).json({ error: err.details?.[0]?.message.replace(/^.*?chaincode response \d+, /, '') || err.message });
 });
 
 app.post('/register', route(async (req) => {
     const { name, password, address } = req.body;
-    await register(name, password);
-    await callContract('submit', { org: 'org2', name }, 'RegisterUser', [address]);
-    return openSession('org2', name);
+    await register(name, password).catch(() => {
+        throw new Error('Не удалось зарегистрировать: имя занято или недопустимо');   // текст утилиты содержит пароль
+    });
+    const user = await enroll('org2', name, password);
+    await callContract('submit', user, 'RegisterUser', [address]);
+    return openSession(user);
 }));
 
 app.post('/login', route(async (req) => {
     const { name, password } = req.body;
-    try {
-        await enroll('org1', name, password);
-        return openSession('org1', name);
-    } catch {
-        await enroll('org2', name, password).catch(() => {
-            throw new Error('Неверное имя или пароль');
-        });
-        return openSession('org2', name);
+    for (const org of ['org1', 'org2']) {
+        const user = await enroll(org, name, password).catch(() => null);
+        if (user) return openSession(user);
     }
+    throw new Error('Неверное имя или пароль');
 }));
 
-// Один маршрут на все методы контракта: evaluate читает, submit записывает в блок
+// Один маршрут на все методы контракта
 app.post('/:kind(evaluate|submit)/:method', route(async (req) => {
     const user = sessions.get(req.headers.authorization);
     if (!user) throw new Error('Требуется вход');

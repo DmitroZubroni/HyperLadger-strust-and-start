@@ -7,16 +7,16 @@
     "api": "node api.js"
   },
   "dependencies": {
-    "fabric-contract-api": "~2.5.8",
-    "fabric-shim": "~2.5.8"
+    "fabric-contract-api": "~2.5",
+    "fabric-shim": "~2.5"
   },
   "devDependencies": {
+    "@grpc/grpc-js": "^1.14.0",
+    "@hyperledger/fabric-gateway": "^1.13.0",
     "cors": "^2.8.5",
-    "express": "^4.21.0",
-    "fabric-ca-client": "2.2.20",
-    "fabric-network": "2.2.20"
+    "express": "^4.21.0"
   },
-  "overrides": {
-    "@grpc/grpc-js": "^1.13.0"
+  "engines": {
+    "node": ">=22.12"
   }
 }
