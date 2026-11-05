@@ -8,47 +8,46 @@
 
 ```mermaid
 flowchart TB
-  CH[("Канал mychannel<br/>общий реестр и контракт")]:::ledger
-
   subgraph O1["Организация Org1 · MSP: Org1MSP"]
+    direction LR
     CA1["Fabric CA ca-org1<br/>порт 7054"]:::ca
-    A1["admin<br/>администратор приложения<br/>тип client"]:::person
-    AD1["org1admin<br/>тип admin"]:::person
-    U1["user1<br/>тип client"]:::person
-    P1["peer0.org1<br/>порт 7051<br/>тип peer"]:::node_
-    CA1 -->|выпускает сертификат| A1
-    CA1 --> AD1
-    CA1 --> U1
-    CA1 --> P1
+    A1["admin — администратор приложения<br/>org1admin, user1"]:::person
+    P1["Пир peer0.org1<br/>порт 7051"]:::node_
+    CA1 -->|выпускает сертификаты| A1
+    CA1 -->|выпускает сертификат| P1
   end
 
   subgraph O2["Организация Org2 · MSP: Org2MSP"]
+    direction LR
     CA2["Fabric CA ca-org2<br/>порт 8054"]:::ca
-    A2["admin, org2admin, user1<br/>созданы при поднятии сети"]:::person
-    U2["ivan, peter, andrey<br/>регистрируются в приложении<br/>тип client"]:::person
-    P2["peer0.org2<br/>порт 9051<br/>тип peer"]:::node_
-    CA2 --> A2
-    CA2 -->|выпускает сертификат| U2
-    CA2 --> P2
+    U2["ivan, peter, andrey — из приложения<br/>admin, org2admin, user1"]:::person
+    P2["Пир peer0.org2<br/>порт 9051"]:::node_
+    CA2 -->|выпускает сертификаты| U2
+    CA2 -->|выпускает сертификат| P2
   end
 
   subgraph O3["Организация OrdererOrg · MSP: OrdererMSP"]
+    direction LR
     CA3["Fabric CA ca-orderer<br/>порт 9054"]:::ca
-    OR["orderer.example.com<br/>порт 7050<br/>собирает блоки"]:::node_
-    CA3 --> OR
+    OR["Ордерер orderer.example.com<br/>порт 7050, собирает блоки"]:::node_
+    CA3 -->|выпускает сертификат| OR
   end
 
-  P1 --- CH
-  P2 --- CH
-  OR --- CH
+  CH[("Канал mychannel<br/>общий реестр и контракт")]:::ledger
 
-  classDef org fill:#e8f1fb,stroke:#2f6db5,color:#12314f
+  O1 ~~~ O2
+  O2 ~~~ O3
+  O3 --- CH
+
   classDef ca fill:#fdf1dc,stroke:#c98a1b,color:#4a3208
   classDef person fill:#e6f5ea,stroke:#3b8f57,color:#14361f
   classDef node_ fill:#f0e9fa,stroke:#7650b5,color:#2b1b4a
   classDef ledger fill:#fbe8e8,stroke:#b84a4a,color:#4a1616
+  classDef org fill:#e8f1fb,stroke:#2f6db5,color:#12314f
   class O1,O2,O3 org
 ```
+
+Все три организации работают с одним каналом: их пиры и ордерер хранят его данные.
 
 | Понятие | Что это | Пример |
 | --- | --- | --- |
