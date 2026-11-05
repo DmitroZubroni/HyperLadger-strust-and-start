@@ -4,33 +4,50 @@
 
 ## 1. Организации, Fabric CA, пользователи, MSP и роли
 
-```
-Канал mychannel: общий реестр и контракт для всех организаций
-│
-├── Организация Org1 ─ MSP: Org1MSP
-│   │
-│   ├── Fabric CA (ca-org1, порт 7054)
-│   │   Хранит учётные записи и пароли, выпускает сертификаты
-│   │   │
-│   │   ├── admin ........ тип client ... администратор CA и нашего приложения
-│   │   ├── org1admin .... тип admin .... администратор организации
-│   │   ├── peer0 ........ тип peer ..... узел
-│   │   └── user1 ........ тип client ... обычный пользователь
-│   │
-│   └── Пир peer0.org1.example.com (порт 7051)
-│
-├── Организация Org2 ─ MSP: Org2MSP
-│   │
-│   ├── Fabric CA (ca-org2, порт 8054)
-│   │   │
-│   │   ├── admin, org2admin, peer0, user1 ... созданы при поднятии сети
-│   │   └── ivan, peter, andrey .............. тип client, регистрируются через приложение
-│   │
-│   └── Пир peer0.org2.example.com (порт 9051)
-│
-└── Организация OrdererOrg ─ MSP: OrdererMSP
-    ├── Fabric CA (ca-orderer, порт 9054)
-    └── Ордерер orderer.example.com (порт 7050): упорядочивает транзакции в блоки
+Цвета на схемах: синий — организация и её MSP, жёлтый — Fabric CA, зелёный — пользователи, фиолетовый — узлы, красный — общий реестр.
+
+```mermaid
+flowchart TB
+  CH[("Канал mychannel<br/>общий реестр и контракт")]:::ledger
+
+  subgraph O1["Организация Org1 · MSP: Org1MSP"]
+    CA1["Fabric CA ca-org1<br/>порт 7054"]:::ca
+    A1["admin<br/>администратор приложения<br/>тип client"]:::person
+    AD1["org1admin<br/>тип admin"]:::person
+    U1["user1<br/>тип client"]:::person
+    P1["peer0.org1<br/>порт 7051<br/>тип peer"]:::node_
+    CA1 -->|выпускает сертификат| A1
+    CA1 --> AD1
+    CA1 --> U1
+    CA1 --> P1
+  end
+
+  subgraph O2["Организация Org2 · MSP: Org2MSP"]
+    CA2["Fabric CA ca-org2<br/>порт 8054"]:::ca
+    A2["admin, org2admin, user1<br/>созданы при поднятии сети"]:::person
+    U2["ivan, peter, andrey<br/>регистрируются в приложении<br/>тип client"]:::person
+    P2["peer0.org2<br/>порт 9051<br/>тип peer"]:::node_
+    CA2 --> A2
+    CA2 -->|выпускает сертификат| U2
+    CA2 --> P2
+  end
+
+  subgraph O3["Организация OrdererOrg · MSP: OrdererMSP"]
+    CA3["Fabric CA ca-orderer<br/>порт 9054"]:::ca
+    OR["orderer.example.com<br/>порт 7050<br/>собирает блоки"]:::node_
+    CA3 --> OR
+  end
+
+  P1 --- CH
+  P2 --- CH
+  OR --- CH
+
+  classDef org fill:#e8f1fb,stroke:#2f6db5,color:#12314f
+  classDef ca fill:#fdf1dc,stroke:#c98a1b,color:#4a3208
+  classDef person fill:#e6f5ea,stroke:#3b8f57,color:#14361f
+  classDef node_ fill:#f0e9fa,stroke:#7650b5,color:#2b1b4a
+  classDef ledger fill:#fbe8e8,stroke:#b84a4a,color:#4a1616
+  class O1,O2,O3 org
 ```
 
 | Понятие | Что это | Пример |
@@ -42,12 +59,20 @@
 
 ### Как сеть определяет пользователя
 
-```
-Сертификат ivan
-├── Выпущен CA организации Org2 ──────► принадлежит Org2MSP
-├── OU=client ───────────────────────► тип участника: client
-├── CN=ivan ─────────────────────────► имя
-└── Атрибут role=driver (если задан) ─► роль для нашего контракта
+```mermaid
+flowchart LR
+  C["Сертификат ivan"]:::person
+  C -->|кем выпущен| A["CA организации Org2"]:::ca
+  A --> AR["Принадлежит Org2MSP"]:::org
+  C -->|поле OU=client| B["Тип участника: client"]:::org
+  C -->|поле CN=ivan| D["Имя: ivan"]:::org
+  C -->|атрибут role=driver, если задан| E["Роль для нашего контракта"]:::org
+
+  classDef org fill:#e8f1fb,stroke:#2f6db5,color:#12314f
+  classDef ca fill:#fdf1dc,stroke:#c98a1b,color:#4a3208
+  classDef person fill:#e6f5ea,stroke:#3b8f57,color:#14361f
+  classDef node_ fill:#f0e9fa,stroke:#7650b5,color:#2b1b4a
+  classDef ledger fill:#fbe8e8,stroke:#b84a4a,color:#4a1616
 ```
 
 Роль бывает двух видов, их легко спутать:
@@ -153,74 +178,109 @@ docker ps | grep org3     # peer0.org3.example.com (порт 11051) и ca_org3 (
 
 ## 3. Взаимодействие компонентов
 
+```mermaid
+flowchart TB
+  B["Браузер: интерфейс на React<br/>порт 3005 (JS) или 3006 (Java)"]:::person
+  API["API: Express или Spring Boot, порт 8091<br/>хранит сертификаты и ключи вошедших"]:::org
+  CA["Fabric CA организаций<br/>пользователи и сертификаты"]:::ca
+
+  B -->|HTTP и JSON| API
+  API -->|"fabric-ca-client, HTTPS"| CA
+  API -->|"Fabric Gateway, gRPC и TLS<br/>подпись ключом пользователя"| P1
+
+  subgraph NET["Сеть Fabric в Docker"]
+    P1["Пир Org1"]:::node_
+    P2["Пир Org2"]:::node_
+    C1["Контейнер контракта"]:::node_
+    C2["Контейнер контракта"]:::node_
+    L1[("Реестр")]:::ledger
+    L2[("Реестр")]:::ledger
+    OR["Ордерер"]:::node_
+    P1 <--> C1
+    P2 <--> C2
+    P1 --- L1
+    P2 --- L2
+    P1 <-->|одобрения| P2
+    P1 -->|транзакция| OR
+    OR -->|блоки| P1
+    OR -->|блоки| P2
+  end
+
+  classDef org fill:#e8f1fb,stroke:#2f6db5,color:#12314f
+  classDef ca fill:#fdf1dc,stroke:#c98a1b,color:#4a3208
+  classDef person fill:#e6f5ea,stroke:#3b8f57,color:#14361f
+  classDef node_ fill:#f0e9fa,stroke:#7650b5,color:#2b1b4a
+  classDef ledger fill:#fbe8e8,stroke:#b84a4a,color:#4a1616
 ```
-┌───────────────────────────────────┐
-│ Браузер: интерфейс на React        │
-│ порт 3005 (JS) или 3006 (Java)     │
-└─────────────────┬─────────────────┘
-                  │ HTTP и JSON
-┌─────────────────▼─────────────────┐
-│ API: Express или Spring Boot       │
-│ порт 8091                          │
-│ Хранит сертификаты и ключи вошедших │
-└────┬───────────────────────┬──────┘
-     │ fabric-ca-client      │ Fabric Gateway (gRPC и TLS)
-     │ HTTPS                 │ транзакция подписана ключом пользователя
-┌────▼──────┐   ┌────────────▼───────────────────────────────┐
-│ Fabric CA │   │ Сеть Fabric в Docker                        │
-│ Org1,Org2 │   │                                             │
-└───────────┘   │  ┌─────────────┐        ┌─────────────┐     │
-                │  │ Пир Org1    │        │ Пир Org2    │     │
-                │  │ реестр      │        │ реестр      │     │
-                │  └──────┬──────┘        └──────┬──────┘     │
-                │  ┌──────▼──────┐        ┌──────▼──────┐     │
-                │  │ Контейнер   │        │ Контейнер   │     │
-                │  │ контракта   │        │ контракта   │     │
-                │  └─────────────┘        └─────────────┘     │
-                │              ┌───────────┐                  │
-                │              │ Ордерер   │                  │
-                │              └───────────┘                  │
-                └─────────────────────────────────────────────┘
-```
+
+На схеме API подключён к пиру Org1, а пользователи Org2 работают так же через пир своей организации.
 
 ### Чтение: `GetMe`
 
-```
-Браузер ─► API ─► пир своей организации ─► контракт читает реестр
-Браузер ◄─ API ◄─────────── данные ◄──────────────┘
-```
-
 Блок не создаётся, поэтому высота цепочки не меняется.
+
+```mermaid
+sequenceDiagram
+  actor U as Браузер
+  participant A as API
+  participant P as Пир своей организации
+  participant C as Контракт
+  participant L as Реестр
+  U->>A: POST /evaluate/GetMe с токеном
+  A->>P: Запрос, подписанный ключом ivan
+  P->>C: Выполнить GetMe
+  C->>L: Прочитать user:ivan
+  L-->>C: Данные
+  C-->>P: Результат
+  P-->>A: Результат
+  A-->>U: JSON с данными
+```
 
 ### Запись: `UpdateAddress`
 
-```
-1. Браузер   ─► API          POST /submit/UpdateAddress с токеном
-2. API       ─► Gateway      транзакция, подписанная ключом ivan
-3. Gateway   ─► пиры Org1 и Org2
-                             каждый выполняет контракт и подписывает результат
-                             реестр пока не меняется
-4. Gateway   ─► ордерер      транзакция с подписями пиров
-5. Ордерер   ─► пиры         транзакция в новом блоке
-6. Пиры                      проверяют подписи и конфликты, записывают блок,
-                             обновляют текущее состояние реестра
-7. API       ─► браузер      результат
-```
-
 Подтверждение нужно от обеих организаций: по умолчанию действует правило большинства, а их в канале две.
+
+```mermaid
+sequenceDiagram
+  actor U as Браузер
+  participant A as API
+  participant P2 as Пир Org2 с Gateway
+  participant P1 as Пир Org1
+  participant O as Ордерер
+  U->>A: POST /submit/UpdateAddress с токеном
+  A->>P2: Транзакция, подписанная ключом ivan
+  Note over P2,P1: Одобрение: контракт выполняется,<br/>реестр пока не меняется
+  P2->>P2: Выполнить контракт и подписать результат
+  P2->>P1: Запросить одобрение
+  P1-->>P2: Результат с подписью
+  P2->>O: Транзакция с подписями пиров
+  O->>P1: Новый блок
+  O->>P2: Новый блок
+  Note over P1,P2: Проверка подписей и конфликтов,<br/>запись блока и обновление реестра
+  P2-->>A: Транзакция записана
+  A-->>U: Результат
+```
 
 ### Регистрация: откуда берётся новый пользователь
 
-```
-1. Браузер ─► API              имя, пароль, адрес
-2. API     ─► CA Org2          register: учётная запись в базе CA
-3. API     ─► CA Org2          enroll: сертификат и закрытый ключ ivan
-4. API     ─► контракт         RegisterUser от имени ivan, запись идёт по схеме выше
-5. Контракт                    берёт имя из сертификата, сохраняет user:ivan
-6. API     ─► браузер          токен сессии
-```
-
 Пароль остаётся в CA и в блокчейн не попадает.
+
+```mermaid
+sequenceDiagram
+  actor U as Браузер
+  participant A as API
+  participant CA as Fabric CA Org2
+  participant N as Сеть и контракт
+  U->>A: POST /register: имя, пароль, адрес
+  A->>CA: register: создать учётную запись
+  CA-->>A: Готово
+  A->>CA: enroll: выпустить сертификат
+  CA-->>A: Сертификат и закрытый ключ ivan
+  A->>N: RegisterUser, подпись ключом ivan
+  Note over N: Контракт берёт имя из сертификата<br/>и сохраняет user:ivan
+  N-->>A: Запись создана
+  A-->>U: Токен сессии
+```
 
 ### Где что хранится
 
