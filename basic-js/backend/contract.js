@@ -15,6 +15,15 @@ async function readUser(ctx, name) {
 
 const writeUser = (ctx, user) => ctx.stub.putState(`user:${user.name}`, Buffer.from(JSON.stringify(user)));
 
+// Все записи с данным началом ключа. Реестр отдаёт их отсортированными по ключу
+async function readAll(ctx, prefix) {
+    const items = [];
+    for await (const { value } of ctx.stub.getStateByRange(`${prefix}:`, `${prefix};`)) {
+        items.push(JSON.parse(value.toString()));
+    }
+    return items;
+}
+
 async function setStatus(ctx, name, status) {
     if (!isAdmin(ctx)) throw new Error('Доступ только для администратора');
     const user = await readUser(ctx, name);
@@ -54,11 +63,25 @@ class UsersContract extends Contract {
     // Все пользователи: только для администратора
     async GetUsers(ctx) {
         if (!isAdmin(ctx)) throw new Error('Доступ только для администратора');
-        const users = [];
-        for await (const { value } of ctx.stub.getStateByRange('user:', 'user;')) {
-            users.push(JSON.parse(value.toString()));
-        }
-        return JSON.stringify(users);
+        return JSON.stringify(await readAll(ctx, 'user'));
+    }
+
+    // Сообщение в общий чат: автор из сертификата, время из транзакции, заблокированному запрещено
+    async SendMessage(ctx, text) {
+        const user = await readUser(ctx, callerName(ctx));
+        if (!user) throw new Error('Писать могут только зарегистрированные пользователи');
+        if (user.status === 'blocked') throw new Error('Вы заблокированы и не можете писать сообщения');
+        const time = ctx.stub.getDateTimestamp();
+        const message = { author: user.name, time: time.toISOString(), text };
+        // Время в начале ключа выстраивает сообщения по порядку, ID транзакции делает ключ уникальным
+        const key = `message:${String(time.getTime()).padStart(15, '0')}:${ctx.stub.getTxID()}`;
+        await ctx.stub.putState(key, Buffer.from(JSON.stringify(message)));
+        return JSON.stringify(message);
+    }
+
+    // Все сообщения по времени: их видят все участники
+    async GetMessages(ctx) {
+        return JSON.stringify(await readAll(ctx, 'message'));
     }
 
     async BlockUser(ctx, name) {

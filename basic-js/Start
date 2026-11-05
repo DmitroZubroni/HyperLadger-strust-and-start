@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 # Запуск решения: сеть, контракт, API (порт 8091), интерфейс (порт 3005)
 set -e
-trap "kill 0" EXIT
 cd "$(dirname "$0")"
 ROOT=$PWD
+
+# Старый API держит порт и не даёт запуститься новому
+if (exec 3<>/dev/tcp/127.0.0.1/8091) 2>/dev/null; then
+  echo "Порт 8091 занят: возможно, запущен старый API. Остановите его и запустите снова."
+  exit 1
+fi
+
+trap "kill 0" EXIT
 
 cd ../fabric-samples/test-network
 ./network.sh down

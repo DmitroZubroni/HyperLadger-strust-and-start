@@ -11,3 +11,10 @@ button.link { padding: 0; color: #0b5d4e; background: none; }
 table { width: 100%; border-collapse: collapse; }
 td { padding: 6px 8px 6px 0; border-bottom: 1px solid #d8dcd7; }
 .error, .blocked { color: #a32a22; }
+nav { display: flex; gap: 16px; align-items: center; }
+.messages { max-height: 55vh; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
+.messages li { padding: 8px 0; border-bottom: 1px solid #d8dcd7; overflow-wrap: anywhere; }
+.messages time { color: #5d686e; font-size: 12px; }
+.messages p { margin: 2px 0 0; white-space: pre-wrap; }
+.send { display: flex; gap: 8px; margin-top: 12px; }
+.send input { margin: 0; }

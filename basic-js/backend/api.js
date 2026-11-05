@@ -52,16 +52,21 @@ async function enroll(org, name, password) {
 
 // --- Контракт: Fabric Gateway ---
 
-// Одно gRPC-соединение на организацию: так советует документация Fabric
+// Одно gRPC-соединение на организацию: так советует документация Fabric.
+// После перезапуска сети сертификат другой, тогда соединение создаётся заново
 const clients = {};
 function grpcClient(org) {
-    if (!clients[org]) {
-        const tlsCert = fs.readFileSync(`${NETWORK}/peerOrganizations/${org}.example.com/tlsca/tlsca.${org}.example.com-cert.pem`);
-        clients[org] = new grpc.Client(ORGS[org].peer, grpc.credentials.createSsl(tlsCert), {
-            'grpc.ssl_target_name_override': `peer0.${org}.example.com`,
-        });
+    const tlsCert = fs.readFileSync(`${NETWORK}/peerOrganizations/${org}.example.com/tlsca/tlsca.${org}.example.com-cert.pem`);
+    if (!clients[org]?.tlsCert.equals(tlsCert)) {
+        clients[org]?.client.close();
+        clients[org] = {
+            tlsCert,
+            client: new grpc.Client(ORGS[org].peer, grpc.credentials.createSsl(tlsCert), {
+                'grpc.ssl_target_name_override': `peer0.${org}.example.com`,
+            }),
+        };
     }
-    return clients[org];
+    return clients[org].client;
 }
 
 // Вызов любого метода контракта от имени пользователя: evaluate читает, submit записывает в блок
@@ -99,6 +104,7 @@ const route = (handler) => (req, res) => handler(req).then((data) => res.json(da
 
 app.post('/register', route(async (req) => {
     const { name, password, address } = req.body;
+    if (!name || !password || !address) throw new Error('Укажите имя, пароль и адрес');
     await register(name, password).catch(() => {
         throw new Error('Не удалось зарегистрировать: имя занято или недопустимо');   // текст утилиты содержит пароль
     });
