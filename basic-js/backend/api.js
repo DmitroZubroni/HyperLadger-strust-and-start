@@ -9,7 +9,7 @@ const grpc = require('@grpc/grpc-js');
 const fabric = require('@hyperledger/fabric-gateway');
 
 // Сертификаты сети и папка с пользователями, созданными в терминале:
-// wallet/<организация>/<имя> — результат fabric-ca-client enroll
+// wallet/<имя> — результат fabric-ca-client enroll
 const NETWORK = path.resolve(__dirname, '../../fabric-samples/test-network/organizations');
 const WALLET = path.resolve(__dirname, '../wallet');
 
@@ -22,34 +22,26 @@ const ORGS = {
 
 // ===== 1. Подключение к сети =====
 
-// Организация пользователя: та, в чьей папке wallet лежат его ключи
-function findOrg(name) {
-    for (const org of Object.keys(ORGS)) {
-        const orgWallet = WALLET + '/' + org;
-        if (fs.existsSync(orgWallet) && fs.readdirSync(orgWallet).includes(name)) {
-            return org;
-        }
-    }
-    return null;
-}
-
-// Подключение к пиру организации от имени пользователя: его сертификат и ключ из wallet
+// Подключение к пиру от имени пользователя: его сертификат и ключ из wallet/<имя>.
+// Администратор состоит в Org1, все остальные пользователи — в Org2
 function connect(name) {
-    const org = findOrg(name);
-    if (!org) {
+    const msp = WALLET + '/' + name;
+    if (!fs.existsSync(msp)) {
         throw new Error('Требуется вход');
     }
-    const msp = WALLET + '/' + org + '/' + name;
+    let org = 'org2';
+    if (name === 'admin') {
+        org = 'org1';
+    }
+
     const certificate = fs.readFileSync(msp + '/signcerts/cert.pem');
     const keyFile = fs.readdirSync(msp + '/keystore')[0];
     const privateKey = crypto.createPrivateKey(fs.readFileSync(msp + '/keystore/' + keyFile));
-
-    // gRPC-соединение с пиром по TLS
     const peerTls = fs.readFileSync(NETWORK + '/peerOrganizations/' + org + '.example.com/tlsca/tlsca.' + org + '.example.com-cert.pem');
+
     const client = new grpc.Client(ORGS[org].peer, grpc.credentials.createSsl(peerTls), {
         'grpc.ssl_target_name_override': 'peer0.' + org + '.example.com',
     });
-
     const gateway = fabric.connect({
         client: client,
         identity: { mspId: ORGS[org].mspId, credentials: certificate },
@@ -97,7 +89,7 @@ app.use(express.json());
 
 // Вход: пользователь должен быть в wallet. Токен — его имя
 app.post('/login', function (req, res) {
-    if (!findOrg(req.body.name)) {
+    if (!fs.existsSync(WALLET + '/' + req.body.name)) {
         res.status(400).json({ error: 'Пользователь не найден' });
         return;
     }

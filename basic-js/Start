@@ -23,7 +23,7 @@ export PATH=$PWD/../bin:$PATH
 export FABRIC_CA_CLIENT_HOME=$PWD/organizations/peerOrganizations/org1.example.com
 rm -rf "$ROOT/wallet"
 fabric-ca-client enroll -u https://admin:adminpw@localhost:7054 --caname ca-org1 \
-  --tls.certfiles "$PWD/organizations/fabric-ca/org1/ca-cert.pem" -M "$ROOT/wallet/org1/admin"
+  --tls.certfiles "$PWD/organizations/fabric-ca/org1/ca-cert.pem" -M "$ROOT/wallet/admin"
 
 cd "$ROOT/backend" && npm install
 node api.js &
