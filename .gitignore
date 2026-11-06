@@ -10,3 +10,4 @@ fabric-samples/
 install-fabric.sh
 .gradle/
 build/
+wallet/
