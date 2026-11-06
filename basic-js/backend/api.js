@@ -1,6 +1,5 @@
 'use strict';
 
-const childProcess = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -9,100 +8,55 @@ const cors = require('cors');
 const grpc = require('@grpc/grpc-js');
 const fabric = require('@hyperledger/fabric-gateway');
 
-// Где лежит сеть Fabric
-const SAMPLES = path.resolve(__dirname, '../../fabric-samples');
-const NETWORK = SAMPLES + '/test-network/organizations';
-
-// Сертификаты и ключи вошедших пользователей: папка на каждую сессию.
-// Лежит вне backend, чтобы ключи не попали в пакет контракта при деплое
+// Сертификаты сети и папка с пользователями, созданными в терминале:
+// wallet/<организация>/<имя> — результат fabric-ca-client enroll
+const NETWORK = path.resolve(__dirname, '../../fabric-samples/test-network/organizations');
 const WALLET = path.resolve(__dirname, '../wallet');
 
 // Организации сети: org1 — администратор, org2 — пользователи
 const ORGS = {
-    org1: { mspId: 'Org1MSP', peer: 'localhost:7051', caPort: 7054 },
-    org2: { mspId: 'Org2MSP', peer: 'localhost:9051', caPort: 8054 },
+    org1: { mspId: 'Org1MSP', peer: 'localhost:7051' },
+    org2: { mspId: 'Org2MSP', peer: 'localhost:9051' },
 };
 
-// Токен сессии -> организация пользователя. Ключи сессии лежат в WALLET/<токен>
-const sessions = new Map();
+// Имя пользователя -> контракт, подключённый от его имени
+const contracts = new Map();
 
 
-// ===== 1. Fabric CA: пользователи и сертификаты =====
+// ===== 1. Подключение к сети: один раз при запуске API =====
 
-// Запуск утилиты fabric-ca-client от имени администратора CA организации
-function runCaClient(org, args, errorMessage) {
-    const env = Object.assign({}, process.env, {
-        FABRIC_CA_CLIENT_HOME: NETWORK + '/peerOrganizations/' + org + '.example.com',
-    });
-    const caArgs = ['--caname', 'ca-' + org, '--tls.certfiles', NETWORK + '/fabric-ca/' + org + '/ca-cert.pem'];
-    try {
-        childProcess.execFileSync(SAMPLES + '/bin/fabric-ca-client', args.concat(caArgs), { env: env, stdio: 'pipe' });
-    } catch (error) {
-        // Текст ошибки утилиты содержит пароль, поэтому наружу отдаём свой
-        throw new Error(errorMessage);
-    }
-}
-
-// Создать учётную запись в CA организации
-function register(org, name, password) {
-    runCaClient(org, ['register', '--id.name', name, '--id.secret', password,
-        '--id.type', 'client', '--id.affiliation', org + '.department1'], 'Имя уже занято');
-}
-
-// Выпустить сертификат и ключ. При неверном пароле CA откажет: это и есть проверка входа
-function login(org, name, password) {
-    const token = crypto.randomUUID();
-    const url = 'https://' + encodeURIComponent(name) + ':' + encodeURIComponent(password) + '@localhost:' + ORGS[org].caPort;
-    runCaClient(org, ['enroll', '-u', url, '-M', WALLET + '/' + token], 'Неверное имя или пароль');
-    sessions.set(token, org);
-    return token;
-}
-
-
-// ===== 2. Смарт-контракт: вызов через Fabric Gateway =====
-
-// type: 'evaluate' — чтение, блок не создаётся; 'submit' — запись в блок
-async function callContract(type, token, method, args) {
-    const org = sessions.get(token);
-    if (!org) {
-        throw new Error('Требуется вход');
+for (const org of Object.keys(ORGS)) {
+    const orgWallet = WALLET + '/' + org;
+    if (!fs.existsSync(orgWallet)) {
+        continue;
     }
 
-    // Сертификат и ключ пользователя
-    const dir = WALLET + '/' + token;
-    const certificate = fs.readFileSync(dir + '/signcerts/cert.pem');
-    const keyFile = fs.readdirSync(dir + '/keystore')[0];
-    const privateKey = crypto.createPrivateKey(fs.readFileSync(dir + '/keystore/' + keyFile));
-
-    // Соединение с пиром своей организации по TLS
+    // gRPC-соединение с пиром организации по TLS
     const peerTls = fs.readFileSync(NETWORK + '/peerOrganizations/' + org + '.example.com/tlsca/tlsca.' + org + '.example.com-cert.pem');
     const client = new grpc.Client(ORGS[org].peer, grpc.credentials.createSsl(peerTls), {
         'grpc.ssl_target_name_override': 'peer0.' + org + '.example.com',
     });
-    const gateway = fabric.connect({
-        client: client,
-        identity: { mspId: ORGS[org].mspId, credentials: certificate },
-        signer: fabric.signers.newPrivateKeySigner(privateKey),
-        hash: fabric.hash.SHA256,
-    });
 
-    try {
-        const contract = gateway.getNetwork('mychannel').getContract('users');
-        let result;
-        if (type === 'submit') {
-            result = await contract.submit(method, { arguments: args });
-        } else {
-            result = await contract.evaluate(method, { arguments: args });
-        }
-        return JSON.parse(Buffer.from(result).toString());
-    } finally {
-        gateway.close();
-        client.close();
+    // Каждый пользователь организации подключается со своим сертификатом и ключом
+    for (const name of fs.readdirSync(orgWallet)) {
+        const msp = orgWallet + '/' + name;
+        const certificate = fs.readFileSync(msp + '/signcerts/cert.pem');
+        const keyFile = fs.readdirSync(msp + '/keystore')[0];
+        const privateKey = crypto.createPrivateKey(fs.readFileSync(msp + '/keystore/' + keyFile));
+
+        const gateway = fabric.connect({
+            client: client,
+            identity: { mspId: ORGS[org].mspId, credentials: certificate },
+            signer: fabric.signers.newPrivateKeySigner(privateKey),
+            hash: fabric.hash.SHA256,
+        });
+        contracts.set(name, gateway.getNetwork('mychannel').getContract('users'));
+        console.log('Пользователь ' + name + ' (' + ORGS[org].mspId + ')');
     }
 }
 
 
-// ===== 3. REST API =====
+// ===== 2. REST API =====
 
 const app = express();
 app.use(cors());
@@ -117,50 +71,45 @@ function sendError(res, error) {
     res.status(400).json({ error: message });
 }
 
-// Регистрация пользователя в Org2: учётная запись в CA, вход, запись в контракте
-app.post('/register', async function (req, res) {
-    try {
-        register('org2', req.body.name, req.body.password);
-        const token = login('org2', req.body.name, req.body.password);
-        await callContract('submit', token, 'RegisterUser', [req.body.address]);
-        res.json({ token: token });
-    } catch (error) {
-        sendError(res, error);
+// Контракт пользователя из заголовка Authorization (в нём имя пользователя)
+function getContract(req) {
+    const contract = contracts.get(req.headers.authorization);
+    if (!contract) {
+        throw new Error('Требуется вход');
     }
-});
+    return contract;
+}
 
-// Вход: пробуем организации по очереди, первой Org1 с администратором
+// Вход: пользователь должен быть в wallet
 app.post('/login', function (req, res) {
-    for (const org of Object.keys(ORGS)) {
-        try {
-            res.json({ token: login(org, req.body.name, req.body.password) });
-            return;
-        } catch (error) {
-            // В этой организации такого пользователя нет, пробуем следующую
-        }
+    if (!contracts.has(req.body.name)) {
+        sendError(res, new Error('Пользователь не найден'));
+        return;
     }
-    sendError(res, new Error('Неверное имя или пароль'));
+    res.json({ token: req.body.name });
 });
 
-// Любой метод контракта: имя метода в адресе, аргументы в теле { args: [...] }
-app.post('/evaluate/:method', async function (req, res) {
+// Чтение: GET /contract/<метод>?args=a&args=b, блок не создаётся
+app.get('/contract/:method', async function (req, res) {
     try {
-        res.json(await callContract('evaluate', req.headers.authorization, req.params.method, req.body.args || []));
+        const args = [].concat(req.query.args || []);
+        const result = await getContract(req).evaluate(req.params.method, { arguments: args });
+        res.json(JSON.parse(Buffer.from(result).toString()));
     } catch (error) {
         sendError(res, error);
     }
 });
 
-app.post('/submit/:method', async function (req, res) {
+// Запись: POST /contract/<метод> с телом { args: [...] }, транзакция попадает в блок
+app.post('/contract/:method', async function (req, res) {
     try {
-        res.json(await callContract('submit', req.headers.authorization, req.params.method, req.body.args || []));
+        const args = req.body.args || [];
+        const result = await getContract(req).submit(req.params.method, { arguments: args });
+        res.json(JSON.parse(Buffer.from(result).toString()));
     } catch (error) {
         sendError(res, error);
     }
 });
-
-// Сессии хранятся в памяти, поэтому ключи прошлого запуска больше не нужны
-fs.rmSync(WALLET, { recursive: true, force: true });
 
 app.listen(8091, function () {
     console.log('API: http://localhost:8091');

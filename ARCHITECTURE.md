@@ -179,12 +179,16 @@ docker ps | grep org3     # peer0.org3.example.com (порт 11051) и ca_org3 (
 
 ```mermaid
 flowchart TB
-  B["Браузер: интерфейс на React<br/>порт 3005 (JS) или 3006 (Java)"]:::person
-  API["API: Express или Spring Boot, порт 8091<br/>сессии, ключи в папке wallet"]:::org
+  T["Терминал: fabric-ca-client<br/>register и enroll"]:::person
   CA["Fabric CA организаций<br/>пользователи и сертификаты"]:::ca
+  W[("Папка wallet<br/>сертификаты и ключи")]:::ca
+  B["Браузер: интерфейс на React, порт 3005"]:::person
+  API["API: Express, порт 8091<br/>читает wallet при запуске"]:::org
 
-  B -->|HTTP и JSON| API
-  API -->|"fabric-ca-client, HTTPS"| CA
+  T -->|HTTPS| CA
+  T -->|enroll -M| W
+  W -->|при запуске| API
+  B -->|"HTTP: GET читает, POST пишет"| API
   API -->|"Fabric Gateway, gRPC и TLS<br/>подпись ключом пользователя"| P1
 
   subgraph NET["Сеть Fabric в Docker"]
@@ -225,7 +229,7 @@ sequenceDiagram
   participant P as Пир своей организации
   participant C as Контракт
   participant L as Реестр
-  U->>A: POST /evaluate/GetMe с токеном
+  U->>A: GET /contract/GetMe, в заголовке имя
   A->>P: Запрос, подписанный ключом ivan
   P->>C: Выполнить GetMe
   C->>L: Прочитать user:ivan
@@ -246,7 +250,7 @@ sequenceDiagram
   participant P2 as Пир Org2 с Gateway
   participant P1 as Пир Org1
   participant O as Ордерер
-  U->>A: POST /submit/UpdateAddress с токеном
+  U->>A: POST /contract/UpdateAddress, в заголовке имя
   A->>P2: Транзакция, подписанная ключом ivan
   Note over P2,P1: Одобрение: контракт выполняется,<br/>реестр пока не меняется
   P2->>P2: Выполнить контракт и подписать результат
@@ -260,25 +264,28 @@ sequenceDiagram
   A-->>U: Результат
 ```
 
-### Регистрация: откуда берётся новый пользователь
+### Новый пользователь: терминал, затем сайт
 
-Пароль остаётся в CA и в блокчейн не попадает.
+Пароль нужен только в терминале и в блокчейн не попадает.
 
 ```mermaid
 sequenceDiagram
-  actor U as Браузер
-  participant A as API
+  actor T as Терминал
   participant CA as Fabric CA Org2
+  participant A as API
+  actor U as Браузер
   participant N as Сеть и контракт
-  U->>A: POST /register: имя, пароль, адрес
-  A->>CA: register: создать учётную запись
-  CA-->>A: Готово
-  A->>CA: enroll: выпустить сертификат
-  CA-->>A: Сертификат и закрытый ключ ivan
+  T->>CA: register: создать учётную запись ivan
+  T->>CA: enroll: выпустить сертификат
+  CA-->>T: Сертификат и ключ в wallet/org2/ivan
+  T->>A: Перезапуск: API читает wallet
+  U->>A: POST /login: ivan
+  A-->>U: Токен: ivan
+  U->>A: POST /contract/RegisterUser: адрес
   A->>N: RegisterUser, подпись ключом ivan
   Note over N: Контракт берёт имя из сертификата<br/>и сохраняет user:ivan
   N-->>A: Запись создана
-  A-->>U: Токен сессии
+  A-->>U: Данные пользователя
 ```
 
 ### Где что хранится
@@ -287,9 +294,9 @@ sequenceDiagram
 | --- | --- |
 | Учётные записи и пароли | База Fabric CA |
 | Сертификаты и ключи организаций и узлов | `test-network/organizations` |
-| Сертификаты и ключи вошедших пользователей | Папка `basic-js/wallet` |
-| Сессии вошедших пользователей | Память API, после его перезапуска нужно войти снова |
+| Сертификаты и ключи пользователей | Папка `basic-js/wallet/<организация>/<имя>`, её заполняет терминал |
+| Подключения пользователей к сети | Память API, создаются при его запуске |
 | Записи `user:<имя>`, сообщения `message:<время>:<транзакция>` и история транзакций | Реестр на пирах |
-| Токен сессии | Память браузера |
+| Токен: имя вошедшего пользователя | Память браузера |
 
-После `./network.sh down` и нового запуска сети сертификаты другие, поэтому старые сессии перестают работать: выйдите и войдите снова.
+После `./network.sh down` и нового запуска сети сертификаты другие, поэтому пользователей нужно создать заново и перезапустить API. `Start` делает это для администратора сам.
