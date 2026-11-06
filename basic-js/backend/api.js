@@ -19,39 +19,72 @@ const ORGS = {
     org2: { mspId: 'Org2MSP', peer: 'localhost:9051' },
 };
 
-// Имя пользователя -> контракт, подключённый от его имени
-const contracts = new Map();
 
+// ===== 1. Подключение к сети =====
 
-// ===== 1. Подключение к сети: один раз при запуске API =====
-
-for (const org of Object.keys(ORGS)) {
-    const orgWallet = WALLET + '/' + org;
-    if (!fs.existsSync(orgWallet)) {
-        continue;
+// Организация пользователя: та, в чьей папке wallet лежат его ключи
+function findOrg(name) {
+    for (const org of Object.keys(ORGS)) {
+        const orgWallet = WALLET + '/' + org;
+        if (fs.existsSync(orgWallet) && fs.readdirSync(orgWallet).includes(name)) {
+            return org;
+        }
     }
+    return null;
+}
 
-    // gRPC-соединение с пиром организации по TLS
+// Подключение к пиру организации от имени пользователя: его сертификат и ключ из wallet
+function connect(name) {
+    const org = findOrg(name);
+    if (!org) {
+        throw new Error('Требуется вход');
+    }
+    const msp = WALLET + '/' + org + '/' + name;
+    const certificate = fs.readFileSync(msp + '/signcerts/cert.pem');
+    const keyFile = fs.readdirSync(msp + '/keystore')[0];
+    const privateKey = crypto.createPrivateKey(fs.readFileSync(msp + '/keystore/' + keyFile));
+
+    // gRPC-соединение с пиром по TLS
     const peerTls = fs.readFileSync(NETWORK + '/peerOrganizations/' + org + '.example.com/tlsca/tlsca.' + org + '.example.com-cert.pem');
     const client = new grpc.Client(ORGS[org].peer, grpc.credentials.createSsl(peerTls), {
         'grpc.ssl_target_name_override': 'peer0.' + org + '.example.com',
     });
 
-    // Каждый пользователь организации подключается со своим сертификатом и ключом
-    for (const name of fs.readdirSync(orgWallet)) {
-        const msp = orgWallet + '/' + name;
-        const certificate = fs.readFileSync(msp + '/signcerts/cert.pem');
-        const keyFile = fs.readdirSync(msp + '/keystore')[0];
-        const privateKey = crypto.createPrivateKey(fs.readFileSync(msp + '/keystore/' + keyFile));
+    const gateway = fabric.connect({
+        client: client,
+        identity: { mspId: ORGS[org].mspId, credentials: certificate },
+        signer: fabric.signers.newPrivateKeySigner(privateKey),
+        hash: fabric.hash.SHA256,
+    });
+    return { client: client, gateway: gateway };
+}
 
-        const gateway = fabric.connect({
-            client: client,
-            identity: { mspId: ORGS[org].mspId, credentials: certificate },
-            signer: fabric.signers.newPrivateKeySigner(privateKey),
-            hash: fabric.hash.SHA256,
-        });
-        contracts.set(name, gateway.getNetwork('mychannel').getContract('users'));
-        console.log('Пользователь ' + name + ' (' + ORGS[org].mspId + ')');
+// Вызов метода контракта от имени пользователя из заголовка Authorization.
+// type: 'evaluate' — чтение, блок не создаётся; 'submit' — запись в блок
+async function callContract(type, req, res, args) {
+    let connection = null;
+    try {
+        connection = connect(req.headers.authorization);
+        const contract = connection.gateway.getNetwork('mychannel').getContract('users');
+        let result;
+        if (type === 'submit') {
+            result = await contract.submit(req.params.method, { arguments: args });
+        } else {
+            result = await contract.evaluate(req.params.method, { arguments: args });
+        }
+        res.json(JSON.parse(Buffer.from(result).toString()));
+    } catch (error) {
+        // Текст ошибки контракта лежит в details
+        let message = error.message;
+        if (error.details && error.details.length > 0) {
+            message = error.details[0].message.replace(/^.*chaincode response \d+, /, '');
+        }
+        res.status(400).json({ error: message });
+    } finally {
+        if (connection) {
+            connection.gateway.close();
+            connection.client.close();
+        }
     }
 }
 
@@ -62,53 +95,23 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Ответ с ошибкой. Текст ошибки контракта лежит в details
-function sendError(res, error) {
-    let message = error.message;
-    if (error.details && error.details.length > 0) {
-        message = error.details[0].message.replace(/^.*chaincode response \d+, /, '');
-    }
-    res.status(400).json({ error: message });
-}
-
-// Контракт пользователя из заголовка Authorization (в нём имя пользователя)
-function getContract(req) {
-    const contract = contracts.get(req.headers.authorization);
-    if (!contract) {
-        throw new Error('Требуется вход');
-    }
-    return contract;
-}
-
-// Вход: пользователь должен быть в wallet
+// Вход: пользователь должен быть в wallet. Токен — его имя
 app.post('/login', function (req, res) {
-    if (!contracts.has(req.body.name)) {
-        sendError(res, new Error('Пользователь не найден'));
+    if (!findOrg(req.body.name)) {
+        res.status(400).json({ error: 'Пользователь не найден' });
         return;
     }
     res.json({ token: req.body.name });
 });
 
-// Чтение: GET /contract/<метод>?args=a&args=b, блок не создаётся
-app.get('/contract/:method', async function (req, res) {
-    try {
-        const args = [].concat(req.query.args || []);
-        const result = await getContract(req).evaluate(req.params.method, { arguments: args });
-        res.json(JSON.parse(Buffer.from(result).toString()));
-    } catch (error) {
-        sendError(res, error);
-    }
+// Чтение: GET /contract/<метод>?args=a&args=b
+app.get('/contract/:method', function (req, res) {
+    callContract('evaluate', req, res, [].concat(req.query.args || []));
 });
 
-// Запись: POST /contract/<метод> с телом { args: [...] }, транзакция попадает в блок
-app.post('/contract/:method', async function (req, res) {
-    try {
-        const args = req.body.args || [];
-        const result = await getContract(req).submit(req.params.method, { arguments: args });
-        res.json(JSON.parse(Buffer.from(result).toString()));
-    } catch (error) {
-        sendError(res, error);
-    }
+// Запись: POST /contract/<метод> с телом { args: [...] }
+app.post('/contract/:method', function (req, res) {
+    callContract('submit', req, res, req.body.args || []);
 });
 
 app.listen(8091, function () {
