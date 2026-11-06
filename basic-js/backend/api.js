@@ -13,80 +13,75 @@ const fabric = require('@hyperledger/fabric-gateway');
 const SAMPLES = path.resolve(__dirname, '../../fabric-samples');
 const NETWORK = SAMPLES + '/test-network/organizations';
 
-// Сертификаты и ключи пользователей. Папка лежит вне backend,
-// чтобы ключи не попали в пакет контракта при деплое
+// Сертификаты и ключи вошедших пользователей: папка на каждую сессию.
+// Лежит вне backend, чтобы ключи не попали в пакет контракта при деплое
 const WALLET = path.resolve(__dirname, '../wallet');
 
-// org1 — администратор, org2 — пользователи
+// Организации сети: org1 — администратор, org2 — пользователи
 const ORGS = {
     org1: { mspId: 'Org1MSP', peer: 'localhost:7051', caPort: 7054 },
     org2: { mspId: 'Org2MSP', peer: 'localhost:9051', caPort: 8054 },
 };
 
-// Токен сессии -> пользователь { org, name }
+// Токен сессии -> организация пользователя. Ключи сессии лежат в WALLET/<токен>
 const sessions = new Map();
 
 
 // ===== 1. Fabric CA: пользователи и сертификаты =====
 
 // Запуск утилиты fabric-ca-client от имени администратора CA организации
-function runCaClient(org, args) {
-    const caCert = NETWORK + '/fabric-ca/' + org + '/ca-cert.pem';
+function runCaClient(org, args, errorMessage) {
     const env = Object.assign({}, process.env, {
         FABRIC_CA_CLIENT_HOME: NETWORK + '/peerOrganizations/' + org + '.example.com',
     });
-    const fullArgs = args.concat(['--caname', 'ca-' + org, '--tls.certfiles', caCert]);
+    const caArgs = ['--caname', 'ca-' + org, '--tls.certfiles', NETWORK + '/fabric-ca/' + org + '/ca-cert.pem'];
     try {
-        childProcess.execFileSync(SAMPLES + '/bin/fabric-ca-client', fullArgs, { env: env, stdio: 'pipe' });
+        childProcess.execFileSync(SAMPLES + '/bin/fabric-ca-client', args.concat(caArgs), { env: env, stdio: 'pipe' });
     } catch (error) {
-        // Текст ошибки утилиты содержит пароль, поэтому наружу его не отдаём
-        throw new Error('Fabric CA отклонил запрос');
+        // Текст ошибки утилиты содержит пароль, поэтому наружу отдаём свой
+        throw new Error(errorMessage);
     }
 }
 
-// Создать учётную запись пользователя в CA организации Org2
-function register(name, password) {
-    runCaClient('org2', [
-        'register',
-        '--id.name', name,
-        '--id.secret', password,
-        '--id.type', 'client',
-        '--id.affiliation', 'org2.department1',
-    ]);
+// Создать учётную запись в CA организации
+function register(org, name, password) {
+    runCaClient(org, ['register', '--id.name', name, '--id.secret', password,
+        '--id.type', 'client', '--id.affiliation', org + '.department1'], 'Имя уже занято');
 }
 
-// Выпустить сертификат и ключ в wallet. Неверный пароль CA отклонит: это и есть проверка входа
-function enroll(org, name, password) {
-    const dir = WALLET + '/' + org + '-' + name;
-    fs.rmSync(dir, { recursive: true, force: true });
-    const url = 'https://' + encodeURIComponent(name) + ':' + encodeURIComponent(password)
-        + '@localhost:' + ORGS[org].caPort;
-    runCaClient(org, ['enroll', '-u', url, '-M', dir]);
+// Выпустить сертификат и ключ. При неверном пароле CA откажет: это и есть проверка входа
+function login(org, name, password) {
+    const token = crypto.randomUUID();
+    const url = 'https://' + encodeURIComponent(name) + ':' + encodeURIComponent(password) + '@localhost:' + ORGS[org].caPort;
+    runCaClient(org, ['enroll', '-u', url, '-M', WALLET + '/' + token], 'Неверное имя или пароль');
+    sessions.set(token, org);
+    return token;
 }
 
 
 // ===== 2. Смарт-контракт: вызов через Fabric Gateway =====
 
 // type: 'evaluate' — чтение, блок не создаётся; 'submit' — запись в блок
-async function callContract(type, user, method, args) {
-    const org = ORGS[user.org];
-    const dir = WALLET + '/' + user.org + '-' + user.name;
+async function callContract(type, token, method, args) {
+    const org = sessions.get(token);
+    if (!org) {
+        throw new Error('Требуется вход');
+    }
 
-    // Сертификат и ключ пользователя из wallet
+    // Сертификат и ключ пользователя
+    const dir = WALLET + '/' + token;
     const certificate = fs.readFileSync(dir + '/signcerts/cert.pem');
     const keyFile = fs.readdirSync(dir + '/keystore')[0];
     const privateKey = crypto.createPrivateKey(fs.readFileSync(dir + '/keystore/' + keyFile));
 
     // Соединение с пиром своей организации по TLS
-    const tlsCert = fs.readFileSync(NETWORK + '/peerOrganizations/' + user.org + '.example.com/tlsca/tlsca.'
-        + user.org + '.example.com-cert.pem');
-    const client = new grpc.Client(org.peer, grpc.credentials.createSsl(tlsCert), {
-        'grpc.ssl_target_name_override': 'peer0.' + user.org + '.example.com',
+    const peerTls = fs.readFileSync(NETWORK + '/peerOrganizations/' + org + '.example.com/tlsca/tlsca.' + org + '.example.com-cert.pem');
+    const client = new grpc.Client(ORGS[org].peer, grpc.credentials.createSsl(peerTls), {
+        'grpc.ssl_target_name_override': 'peer0.' + org + '.example.com',
     });
-
     const gateway = fabric.connect({
         client: client,
-        identity: { mspId: org.mspId, credentials: certificate },
+        identity: { mspId: ORGS[org].mspId, credentials: certificate },
         signer: fabric.signers.newPrivateKeySigner(privateKey),
         hash: fabric.hash.SHA256,
     });
@@ -113,12 +108,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-function createSession(user) {
-    const token = crypto.randomUUID();
-    sessions.set(token, user);
-    return token;
-}
-
 // Ответ с ошибкой. Текст ошибки контракта лежит в details
 function sendError(res, error) {
     let message = error.message;
@@ -128,82 +117,50 @@ function sendError(res, error) {
     res.status(400).json({ error: message });
 }
 
-// Имя попадает в путь к папке wallet, поэтому только латиница, цифры, _ и -
-function checkName(name) {
-    if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
-        throw new Error('Имя: латинские буквы, цифры, _ и -');
-    }
-}
-
-// Регистрация: учётная запись в CA, сертификат, запись в контракте
+// Регистрация пользователя в Org2: учётная запись в CA, вход, запись в контракте
 app.post('/register', async function (req, res) {
     try {
-        const name = req.body.name;
-        const password = req.body.password;
-        const address = req.body.address;
-        if (!name || !password || !address) {
-            throw new Error('Укажите имя, пароль и адрес');
-        }
-        checkName(name);
-        try {
-            register(name, password);
-        } catch (error) {
-            throw new Error('Имя ' + name + ' уже занято');
-        }
-        enroll('org2', name, password);
-        const user = { org: 'org2', name: name };
-        await callContract('submit', user, 'RegisterUser', [address]);
-        res.json({ token: createSession(user) });
+        register('org2', req.body.name, req.body.password);
+        const token = login('org2', req.body.name, req.body.password);
+        await callContract('submit', token, 'RegisterUser', [req.body.address]);
+        res.json({ token: token });
     } catch (error) {
         sendError(res, error);
     }
 });
 
-// Вход: сначала ищем пользователя в Org1 (администратор), потом в Org2
+// Вход: пробуем организации по очереди, первой Org1 с администратором
 app.post('/login', function (req, res) {
+    for (const org of Object.keys(ORGS)) {
+        try {
+            res.json({ token: login(org, req.body.name, req.body.password) });
+            return;
+        } catch (error) {
+            // В этой организации такого пользователя нет, пробуем следующую
+        }
+    }
+    sendError(res, new Error('Неверное имя или пароль'));
+});
+
+// Любой метод контракта: имя метода в адресе, аргументы в теле { args: [...] }
+app.post('/evaluate/:method', async function (req, res) {
     try {
-        const name = req.body.name;
-        const password = req.body.password;
-        if (!name || !password) {
-            throw new Error('Укажите имя и пароль');
-        }
-        checkName(name);
-        for (const org of ['org1', 'org2']) {
-            try {
-                enroll(org, name, password);
-                res.json({ token: createSession({ org: org, name: name }) });
-                return;
-            } catch (error) {
-                // В этой организации не нашли, пробуем следующую
-            }
-        }
-        throw new Error('Неверное имя или пароль');
+        res.json(await callContract('evaluate', req.headers.authorization, req.params.method, req.body.args || []));
     } catch (error) {
         sendError(res, error);
     }
 });
 
-// Вызов любого метода контракта: имя метода в адресе, аргументы в теле { args: [...] }
-async function handleContract(type, req, res) {
+app.post('/submit/:method', async function (req, res) {
     try {
-        const user = sessions.get(req.headers.authorization);
-        if (!user) {
-            throw new Error('Требуется вход');
-        }
-        const args = req.body.args || [];
-        res.json(await callContract(type, user, req.params.method, args));
+        res.json(await callContract('submit', req.headers.authorization, req.params.method, req.body.args || []));
     } catch (error) {
         sendError(res, error);
     }
-}
-
-app.post('/evaluate/:method', function (req, res) {
-    handleContract('evaluate', req, res);
 });
 
-app.post('/submit/:method', function (req, res) {
-    handleContract('submit', req, res);
-});
+// Сессии хранятся в памяти, поэтому ключи прошлого запуска больше не нужны
+fs.rmSync(WALLET, { recursive: true, force: true });
 
 app.listen(8091, function () {
     console.log('API: http://localhost:8091');

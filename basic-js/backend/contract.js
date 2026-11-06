@@ -37,6 +37,7 @@ class UsersContract extends Contract {
     // Регистрация: имя берётся из сертификата, пароль хранит Fabric CA
     async RegisterUser(ctx, address) {
         if (ctx.clientIdentity.getMSPID() !== USERS_ORG) throw new Error('Пользователь должен быть из организации Org2');
+        if (!address || !address.trim()) throw new Error('Укажите адрес');
         const name = callerName(ctx);
         if (await readUser(ctx, name)) throw new Error(`Имя ${name} уже занято`);
         const user = { name, address, status: 'active' };
@@ -55,6 +56,7 @@ class UsersContract extends Contract {
         const user = await readUser(ctx, callerName(ctx));
         if (!user) throw new Error('Пользователь не зарегистрирован');
         if (user.status === 'blocked') throw new Error('Вы заблокированы и не можете менять данные');
+        if (!address || !address.trim()) throw new Error('Укажите адрес');
         user.address = address;
         await writeUser(ctx, user);
         return JSON.stringify(user);
@@ -71,6 +73,7 @@ class UsersContract extends Contract {
         const user = await readUser(ctx, callerName(ctx));
         if (!user) throw new Error('Писать могут только зарегистрированные пользователи');
         if (user.status === 'blocked') throw new Error('Вы заблокированы и не можете писать сообщения');
+        if (!text || !text.trim()) throw new Error('Сообщение не может быть пустым');
         const time = ctx.stub.getDateTimestamp();
         const message = { author: user.name, time: time.toISOString(), text };
         // Время в начале ключа выстраивает сообщения по порядку, ID транзакции делает ключ уникальным
