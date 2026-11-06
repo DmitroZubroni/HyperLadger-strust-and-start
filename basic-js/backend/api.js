@@ -8,43 +8,40 @@ const cors = require('cors');
 const grpc = require('@grpc/grpc-js');
 const fabric = require('@hyperledger/fabric-gateway');
 
-// Сертификаты сети и папка с пользователями, созданными в терминале:
-// wallet/<имя> — результат fabric-ca-client enroll
-const NETWORK = path.resolve(__dirname, '../../fabric-samples/test-network/organizations');
-const WALLET = path.resolve(__dirname, '../wallet');
+// Организации и пользователи сети лежат в fabric-samples:
+// peerOrganizations/<организация>/users/<имя>@<организация>/msp — сертификат и ключ пользователя
+const PEER_ORGS = path.resolve(__dirname, '../../fabric-samples/test-network/organizations/peerOrganizations');
+const PORT = process.env.PORT || 8091;
 
-// Организации сети: org1 — администратор, org2 — пользователи
-const ORGS = {
-    org1: { mspId: 'Org1MSP', peer: 'localhost:7051' },
-    org2: { mspId: 'Org2MSP', peer: 'localhost:9051' },
-};
+// Пользователь — имя его папки: <имя>@<организация>. Только буквы, цифры, точка, дефис и подчёркивание
+const USER = /^([\w.-]+)@([\w.-]+)$/;
 
 
 // ===== 1. Подключение к сети =====
 
-// Подключение к пиру от имени пользователя: его сертификат и ключ из wallet/<имя>.
-// Администратор состоит в Org1, все остальные пользователи — в Org2
-function connect(name) {
-    const msp = WALLET + '/' + name;
-    if (!fs.existsSync(msp)) {
+// Подключение к пиру организации от имени пользователя.
+// Организация — часть имени (после @), поэтому здесь её не ищем.
+// Адрес пира и его TLS-сертификат — из профиля connection-<org>.json, который создаёт network.sh
+function connect(user) {
+    const match = USER.exec(user || '');
+    const msp = PEER_ORGS + '/' + (match && match[2]) + '/users/' + user + '/msp';
+    if (!match || !fs.existsSync(msp)) {
         throw new Error('Требуется вход');
     }
-    let org = 'org2';
-    if (name === 'admin') {
-        org = 'org1';
-    }
+    const orgDir = match[2];
+    const profile = JSON.parse(fs.readFileSync(PEER_ORGS + '/' + orgDir + '/connection-' + orgDir.split('.')[0] + '.json'));
+    const org = Object.values(profile.organizations)[0];
+    const peer = profile.peers[org.peers[0]];
 
-    const certificate = fs.readFileSync(msp + '/signcerts/cert.pem');
-    const keyFile = fs.readdirSync(msp + '/keystore')[0];
-    const privateKey = crypto.createPrivateKey(fs.readFileSync(msp + '/keystore/' + keyFile));
-    const peerTls = fs.readFileSync(NETWORK + '/peerOrganizations/' + org + '.example.com/tlsca/tlsca.' + org + '.example.com-cert.pem');
+    const certificate = fs.readFileSync(msp + '/signcerts/' + fs.readdirSync(msp + '/signcerts')[0]);
+    const privateKey = crypto.createPrivateKey(fs.readFileSync(msp + '/keystore/' + fs.readdirSync(msp + '/keystore')[0]));
 
-    const client = new grpc.Client(ORGS[org].peer, grpc.credentials.createSsl(peerTls), {
-        'grpc.ssl_target_name_override': 'peer0.' + org + '.example.com',
+    const client = new grpc.Client(peer.url.replace('grpcs://', ''), grpc.credentials.createSsl(Buffer.from(peer.tlsCACerts.pem)), {
+        'grpc.ssl_target_name_override': peer.grpcOptions['ssl-target-name-override'],
     });
     const gateway = fabric.connect({
         client: client,
-        identity: { mspId: ORGS[org].mspId, credentials: certificate },
+        identity: { mspId: org.mspid, credentials: certificate },
         signer: fabric.signers.newPrivateKeySigner(privateKey),
         hash: fabric.hash.SHA256,
     });
@@ -52,7 +49,8 @@ function connect(name) {
 }
 
 // Вызов метода контракта от имени пользователя из заголовка Authorization.
-// type: 'evaluate' — чтение, блок не создаётся; 'submit' — запись в блок
+// type: 'evaluate' — чтение, блок не создаётся; 'submit' — запись в блок.
+// Кому какой метод доступен, решает контракт по организации и имени из сертификата
 async function callContract(type, req, res, args) {
     let connection = null;
     try {
@@ -87,13 +85,32 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Вход: пользователь должен быть в wallet. Токен — его имя
+// Вход по имени: ищем папку пользователя во всех организациях сети — только здесь.
+// Можно ввести и полное имя папки (Admin@org1.example.com), если имя есть в нескольких организациях.
+// Токен — полное имя папки: по нему connect сразу знает организацию
 app.post('/login', function (req, res) {
-    if (!fs.existsSync(WALLET + '/' + req.body.name)) {
+    const name = String(req.body.name || '').toLowerCase();
+    const found = [];
+    for (const orgDir of fs.readdirSync(PEER_ORGS)) {
+        const users = PEER_ORGS + '/' + orgDir + '/users';
+        if (!fs.existsSync(users)) {
+            continue;
+        }
+        for (const user of fs.readdirSync(users)) {
+            if (USER.test(user) && (user.toLowerCase() === name || user.split('@')[0].toLowerCase() === name)) {
+                found.push(user);
+            }
+        }
+    }
+    if (found.length === 0) {
         res.status(400).json({ error: 'Пользователь не найден' });
         return;
     }
-    res.json({ token: req.body.name });
+    if (found.length > 1) {
+        res.status(400).json({ error: 'Имя есть в нескольких организациях, введите полностью: ' + found.join(', ') });
+        return;
+    }
+    res.json({ token: found[0] });
 });
 
 // Чтение: GET /contract/<метод>?args=a&args=b
@@ -106,6 +123,6 @@ app.post('/contract/:method', function (req, res) {
     callContract('submit', req, res, req.body.args || []);
 });
 
-app.listen(8091, function () {
-    console.log('API: http://localhost:8091');
+app.listen(PORT, function () {
+    console.log('API: http://localhost:' + PORT);
 });
