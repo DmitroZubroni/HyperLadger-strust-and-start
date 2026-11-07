@@ -133,15 +133,15 @@ fabric-ca-client register --caname ca-org2 --id.name maria --id.secret mariapw \
 
 ```bash
 fabric-ca-client enroll -u https://ivan:ivanpw@localhost:8054 --caname ca-org2 \
-  --tls.certfiles $CA_CERT -M $PWD/wallet/ivan/msp
+  --tls.certfiles $CA_CERT -M $PWD/organizations/peerOrganizations/org2.example.com/users/ivan@org2.example.com/msp
 ```
 
 Шаг 3. Проверить результат.
 
 ```bash
 fabric-ca-client identity list --id ivan --caname ca-org2 --tls.certfiles $CA_CERT
-openssl x509 -in wallet/ivan/msp/signcerts/cert.pem -noout -subject
-openssl x509 -in wallet/ivan/msp/signcerts/cert.pem -noout -text | grep -A1 '1.2.3.4.5.6.7.8.1'
+openssl x509 -in organizations/peerOrganizations/org2.example.com/users/ivan@org2.example.com/msp/signcerts/cert.pem -noout -subject
+openssl x509 -in organizations/peerOrganizations/org2.example.com/users/ivan@org2.example.com/msp/signcerts/cert.pem -noout -text | grep -A1 '1.2.3.4.5.6.7.8.1'
 ```
 
 Шаг 4. Прочитать роль в контракте. Наш контракт атрибут пока не использует, это пример на будущее.
@@ -181,9 +181,9 @@ docker ps | grep org3     # peer0.org3.example.com (порт 11051) и ca_org3 (
 flowchart TB
   T["Терминал: fabric-ca-client<br/>register и enroll"]:::person
   CA["Fabric CA организаций<br/>пользователи и сертификаты"]:::ca
-  W[("Папка wallet<br/>сертификаты и ключи")]:::ca
+  W[("Папка users организации<br/>сертификаты и ключи")]:::ca
   B["Браузер: интерфейс на React, порт 3005"]:::person
-  API["API: Express, порт 8091<br/>читает wallet на каждый запрос"]:::org
+  API["API: Express, порт 8091<br/>читает ключи на каждый запрос"]:::org
 
   T -->|HTTPS| CA
   T -->|enroll -M| W
@@ -277,10 +277,8 @@ sequenceDiagram
   participant N as Сеть и контракт
   T->>CA: register: создать учётную запись ivan
   T->>CA: enroll: выпустить сертификат
-  CA-->>T: Сертификат и ключ в wallet/ivan
-  U->>A: POST /login: ivan
-  A-->>U: Токен: ivan
-  U->>A: POST /contract/RegisterUser: адрес
+  CA-->>T: Сертификат и ключ в users/ivan@org2.example.com
+  U->>A: POST /contract/RegisterUser: адрес, имя ivan@org2.example.com
   A->>N: RegisterUser, подпись ключом ivan
   Note over N: Контракт берёт имя из сертификата<br/>и сохраняет user:ivan
   N-->>A: Запись создана
@@ -293,7 +291,7 @@ sequenceDiagram
 | --- | --- |
 | Учётные записи и пароли | База Fabric CA |
 | Сертификаты и ключи организаций и узлов | `test-network/organizations` |
-| Сертификаты и ключи пользователей | Папка `basic-js/wallet/<имя>`, её заполняет терминал |
+| Сертификаты и ключи пользователей | `test-network/organizations/peerOrganizations/<организация>/users/<имя>@<организация>/msp`, их создаёт разработчик в терминале |
 | Подключения пользователей к сети | Создаются на каждый запрос и сразу закрываются |
 | Записи `user:<имя>`, сообщения `message:<время>:<транзакция>` и история транзакций | Реестр на пирах |
 | Токен: имя вошедшего пользователя | Память браузера |

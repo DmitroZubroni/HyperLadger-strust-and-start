@@ -8,73 +8,73 @@ const cors = require('cors');
 const grpc = require('@grpc/grpc-js');
 const fabric = require('@hyperledger/fabric-gateway');
 
-// Организации и пользователи сети лежат в fabric-samples:
-// peerOrganizations/<организация>/users/<имя>@<организация>/msp — сертификат и ключ пользователя
-const PEER_ORGS = path.resolve(__dirname, '../../fabric-samples/test-network/organizations/peerOrganizations');
-const PORT = process.env.PORT || 8091;
+// Пользователей создаёт разработчик в терминале (fabric-ca-client register и enroll),
+// их ключи лежат в peerOrganizations/<организация>/users/<имя>@<организация>/msp
+const NETWORK = path.resolve(__dirname, '../../fabric-samples/test-network/organizations/peerOrganizations');
 
-// Пользователь — имя его папки: <имя>@<организация>. Только буквы, цифры, точка, дефис и подчёркивание
-const USER = /^([\w.-]+)@([\w.-]+)$/;
+// Организации сети: MSP и адрес пира
+const ORGS = {
+    'org1.example.com': { mspId: 'Org1MSP', peer: 'localhost:7051' },
+    'org2.example.com': { mspId: 'Org2MSP', peer: 'localhost:9051' },
+};
 
 
 // ===== 1. Подключение к сети =====
 
-// Подключение к пиру организации от имени пользователя.
-// Организация — часть имени (после @), поэтому здесь её не ищем.
-// Адрес пира и его TLS-сертификат — из профиля connection-<org>.json, который создаёт network.sh
-function connect(user) {
-    const match = USER.exec(user || '');
-    const msp = PEER_ORGS + '/' + (match && match[2]) + '/users/' + user + '/msp';
-    if (!match || !fs.existsSync(msp)) {
-        throw new Error('Требуется вход');
+// Одно gRPC-соединение на организацию. После перезапуска сети сертификат пира
+// другой, тогда соединение создаётся заново
+const clients = {};
+function grpcClient(org) {
+    const tlsCert = fs.readFileSync(NETWORK + '/' + org + '/tlsca/tlsca.' + org + '-cert.pem');
+    if (!clients[org] || !clients[org].tlsCert.equals(tlsCert)) {
+        if (clients[org]) {
+            clients[org].client.close();
+        }
+        clients[org] = {
+            tlsCert: tlsCert,
+            client: new grpc.Client(ORGS[org].peer, grpc.credentials.createSsl(tlsCert), {
+                'grpc.ssl_target_name_override': 'peer0.' + org,
+            }),
+        };
     }
-    const orgDir = match[2];
-    const profile = JSON.parse(fs.readFileSync(PEER_ORGS + '/' + orgDir + '/connection-' + orgDir.split('.')[0] + '.json'));
-    const org = Object.values(profile.organizations)[0];
-    const peer = profile.peers[org.peers[0]];
+    return clients[org].client;
+}
 
-    const certificate = fs.readFileSync(msp + '/signcerts/' + fs.readdirSync(msp + '/signcerts')[0]);
-    const privateKey = crypto.createPrivateKey(fs.readFileSync(msp + '/keystore/' + fs.readdirSync(msp + '/keystore')[0]));
+// Вызов метода контракта от имени пользователя, например ivan@org2.example.com.
+// type: 'evaluate' — чтение, блок не создаётся; 'submit' — запись в блок
+async function callContract(type, user, method, args) {
+    const org = String(user).split('@')[1];
+    const msp = NETWORK + '/' + org + '/users/' + user + '/msp';
+    if (!ORGS[org] || !fs.existsSync(msp)) {
+        throw new Error('Пользователь не найден');
+    }
+    const certificate = fs.readFileSync(msp + '/signcerts/cert.pem');
+    const keyFile = fs.readdirSync(msp + '/keystore')[0];
+    const privateKey = crypto.createPrivateKey(fs.readFileSync(msp + '/keystore/' + keyFile));
 
-    const client = new grpc.Client(peer.url.replace('grpcs://', ''), grpc.credentials.createSsl(Buffer.from(peer.tlsCACerts.pem)), {
-        'grpc.ssl_target_name_override': peer.grpcOptions['ssl-target-name-override'],
-    });
     const gateway = fabric.connect({
-        client: client,
-        identity: { mspId: org.mspid, credentials: certificate },
+        client: grpcClient(org),
+        identity: { mspId: ORGS[org].mspId, credentials: certificate },
         signer: fabric.signers.newPrivateKeySigner(privateKey),
         hash: fabric.hash.SHA256,
     });
-    return { client: client, gateway: gateway };
-}
-
-// Вызов метода контракта от имени пользователя из заголовка Authorization.
-// type: 'evaluate' — чтение, блок не создаётся; 'submit' — запись в блок.
-// Кому какой метод доступен, решает контракт по организации и имени из сертификата
-async function callContract(type, req, res, args) {
-    let connection = null;
     try {
-        connection = connect(req.headers.authorization);
-        const contract = connection.gateway.getNetwork('mychannel').getContract('users');
+        const contract = gateway.getNetwork('mychannel').getContract('users');
         let result;
         if (type === 'submit') {
-            result = await contract.submit(req.params.method, { arguments: args });
+            result = await contract.submit(method, { arguments: args });
         } else {
-            result = await contract.evaluate(req.params.method, { arguments: args });
+            result = await contract.evaluate(method, { arguments: args });
         }
-        res.json(JSON.parse(Buffer.from(result).toString()));
+        return JSON.parse(Buffer.from(result).toString());
     } catch (error) {
         // Текст ошибки контракта лежит в details
-        let message = error.message;
         if (error.details && error.details.length > 0) {
-            message = error.details[0].message.replace(/^.*chaincode response \d+, /, '');
+            throw new Error(error.details[0].message.replace(/^.*chaincode response \d+, /, ''));
         }
-        res.status(400).json({ error: message });
+        throw error;
     } finally {
-        if (connection) {
-            connection.gateway.close();
-            connection.client.close();
-        }
+        gateway.close();
     }
 }
 
@@ -85,44 +85,26 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Вход по имени: ищем папку пользователя во всех организациях сети — только здесь.
-// Можно ввести и полное имя папки (Admin@org1.example.com), если имя есть в нескольких организациях.
-// Токен — полное имя папки: по нему connect сразу знает организацию
-app.post('/login', function (req, res) {
-    const name = String(req.body.name || '').toLowerCase();
-    const found = [];
-    for (const orgDir of fs.readdirSync(PEER_ORGS)) {
-        const users = PEER_ORGS + '/' + orgDir + '/users';
-        if (!fs.existsSync(users)) {
-            continue;
-        }
-        for (const user of fs.readdirSync(users)) {
-            if (USER.test(user) && (user.toLowerCase() === name || user.split('@')[0].toLowerCase() === name)) {
-                found.push(user);
-            }
-        }
+// Чтение: GET /contract/<метод>?args=a&args=b, имя пользователя в заголовке Authorization
+app.get('/contract/:method', async function (req, res) {
+    try {
+        const args = [].concat(req.query.args || []);
+        res.json(await callContract('evaluate', req.headers.authorization, req.params.method, args));
+    } catch (error) {
+        res.status(400).json({ error: error.message });
     }
-    if (found.length === 0) {
-        res.status(400).json({ error: 'Пользователь не найден' });
-        return;
-    }
-    if (found.length > 1) {
-        res.status(400).json({ error: 'Имя есть в нескольких организациях, введите полностью: ' + found.join(', ') });
-        return;
-    }
-    res.json({ token: found[0] });
-});
-
-// Чтение: GET /contract/<метод>?args=a&args=b
-app.get('/contract/:method', function (req, res) {
-    callContract('evaluate', req, res, [].concat(req.query.args || []));
 });
 
 // Запись: POST /contract/<метод> с телом { args: [...] }
-app.post('/contract/:method', function (req, res) {
-    callContract('submit', req, res, req.body.args || []);
+app.post('/contract/:method', async function (req, res) {
+    try {
+        const args = req.body.args || [];
+        res.json(await callContract('submit', req.headers.authorization, req.params.method, args));
+    } catch (error) {
+        res.status(400).json({ error: error.message });
+    }
 });
 
-app.listen(PORT, function () {
-    console.log('API: http://localhost:' + PORT);
+app.listen(8091, function () {
+    console.log('API: http://localhost:8091');
 });

@@ -42,21 +42,19 @@ export function AuthProvider({ children }) {
 
   // Вход по имени пользователя, созданного в терминале
   async function login(form) {
-    const result = await request('POST', '/login', null, { name: form.name });
-    const me = await evaluateAs(result.token, 'GetMe', []);
+    const me = await evaluateAs(form.name, 'GetMe', []);
     if (!me) {
       throw new Error('Сначала зарегистрируйтесь');
     }
     setUser(me);
-    setToken(result.token);
+    setToken(form.name);
   }
 
-  // Регистрация: вход и запись своих данных в контракт
+  // Регистрация: запись своих данных в контракт
   async function register(form) {
-    const result = await request('POST', '/login', null, { name: form.name });
-    await submitAs(result.token, 'RegisterUser', [form.address]);
-    setUser(await evaluateAs(result.token, 'GetMe', []));
-    setToken(result.token);
+    await submitAs(form.name, 'RegisterUser', [form.address]);
+    setUser(await evaluateAs(form.name, 'GetMe', []));
+    setToken(form.name);
   }
 
   function logout() {
