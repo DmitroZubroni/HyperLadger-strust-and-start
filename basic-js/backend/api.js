@@ -59,7 +59,8 @@ async function callContract(type, user, method, args) {
         hash: fabric.hash.SHA256,
     });
     try {
-        const contract = gateway.getNetwork('mychannel').getContract('users');
+        // default name for network is "myChannel" and for contract is "basic"
+        const contract = gateway.getNetwork('mychannel').getContract('basic');
         let result;
         if (type === 'submit') {
             result = await contract.submit(method, { arguments: args });
