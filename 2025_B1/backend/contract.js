@@ -18,7 +18,6 @@ const { Contract } = require('fabric-contract-api');
 
 const BANK_MSP = 'BankMSP';
 const USERS_MSP = 'UsersMSP';
-const ROLE_BANK = 'bank';
 const ROLE_DPS = 'dps';
 
 const BANK_KEY = 'bank';
@@ -82,12 +81,14 @@ function callerLogin(ctx) {
 
 const callerRole = (ctx) => ctx.clientIdentity.getAttributeValue('role');
 
+// Банк — любой пользователь организации Bank
 function requireBank(ctx) {
-    if (ctx.clientIdentity.getMSPID() !== BANK_MSP || callerRole(ctx) !== ROLE_BANK) {
+    if (ctx.clientIdentity.getMSPID() !== BANK_MSP) {
         throw new Error('Доступ только для аккаунта банка');
     }
 }
 
+// Сотрудник ДПС — пользователь Users с атрибутом role=dps в сертификате
 function requireDps(ctx) {
     if (ctx.clientIdentity.getMSPID() !== USERS_MSP || callerRole(ctx) !== ROLE_DPS) {
         throw new Error('Доступ только для сотрудника ДПС');
@@ -160,12 +161,11 @@ class TrafficContract extends Contract {
     }
 
     /**
-     * Начальное заполнение реестра. Вызывается один раз аккаунтом банка.
-     * Создаёт счёт банка (1000 ProfiCoin), базу удостоверений и стартовых водителей.
+     * Начальное заполнение реестра: счёт банка (1000 ProfiCoin), база удостоверений
+     * и стартовые водители. Вызывается один раз при деплое: deployCC -cci InitLedger.
      * @returns {string} JSON { ok, message }
      */
     async InitLedger(ctx) {
-        requireBank(ctx);
         if (await readJson(ctx, BANK_KEY)) {
             throw new Error('Реестр уже инициализирован');
         }
@@ -381,4 +381,6 @@ class TrafficContract extends Contract {
     }
 }
 
+// Fabric загружает контракты из этого массива
 module.exports = TrafficContract;
+module.exports.contracts = [TrafficContract];

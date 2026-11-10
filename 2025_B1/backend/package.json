@@ -1,0 +1,23 @@
+{
+  "name": "traffic",
+  "version": "1.0.0",
+  "main": "contract.js",
+  "scripts": {
+    "start": "fabric-chaincode-node start",
+    "api": "node api.js"
+  },
+  "dependencies": {
+    "fabric-contract-api": "~2.5",
+    "fabric-shim": "~2.5"
+  },
+  "devDependencies": {
+    "@grpc/grpc-js": "^1.14.0",
+    "@hyperledger/fabric-gateway": "^1.13.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.0"
+  },
+  "engines": {
+    "node": ">=22.12"
+  },
+  "description": "Безопасное дорожное движение: смарт-контракт и API рядом с ним"
+}

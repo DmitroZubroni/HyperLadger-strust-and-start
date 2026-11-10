@@ -1,3 +1,0 @@
-#!/usr/bin/env bash
-# Остановка сети с удалением всех её данных.
-cd "$(dirname "$0")" && ./scripts/network.sh down

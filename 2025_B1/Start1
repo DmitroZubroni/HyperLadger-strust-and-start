@@ -1,10 +1,55 @@
 #!/usr/bin/env bash
-# Полный запуск решения. Сеть создаётся заново, все данные прошлого запуска удаляются.
-set -euo pipefail
+# Запуск модуля 2: сеть с организациями Bank и Users, канал blockchain2025,
+# контракт, стартовые пользователи, API (порт 8091), интерфейс (порт 3005)
+set -e
 cd "$(dirname "$0")"
+ROOT=$PWD
 
-./scripts/network.sh down >/dev/null 2>&1 || true
-./scripts/network.sh up
-./scripts/deploy.sh
-(cd api && npm install --no-audit --no-fund && node seed.js)
-cd api && exec node server.js
+# Старый API держит порт и не даёт запуститься новому
+if (exec 3<>/dev/tcp/127.0.0.1/8091) 2>/dev/null; then
+  echo "Порт 8091 занят: возможно, запущен старый API. Остановите его и запустите снова."
+  exit 1
+fi
+
+trap "kill 0" EXIT
+
+# 1. Копия test-network с организациями Bank и Users вместо Org1 и Org2 (создаётся один раз)
+cd ../fabric-samples
+if [ ! -d test-network-2025 ]; then
+  cp -R test-network test-network-2025
+  cd test-network-2025
+  mv organizations/fabric-ca/org1 organizations/fabric-ca/bank
+  mv organizations/fabric-ca/org2 organizations/fabric-ca/users
+  mv organizations/cryptogen/crypto-config-org1.yaml organizations/cryptogen/crypto-config-bank.yaml
+  mv organizations/cryptogen/crypto-config-org2.yaml organizations/cryptogen/crypto-config-users.yaml
+  perl -pi -e 's/org\$\{ORG\}/\${ORG}/g; s/Org\$\{ORG\}/\${ORGNAME}/g' organizations/ccp-template.json organizations/ccp-template.yaml
+  perl -pi -e 's/sed -e "s\/\\\$\{ORG\}\/\$1\/" /sed -e "s\/\\\${ORG}\/\$1\/" -e "s\/\\\${ORGNAME}\/\$6\/" /; s/^ORG=1$/ORG=org1\nNAME=Org1/; s/^ORG=2$/ORG=org2\nNAME=Org2/; s/\$CAPEM\)/\$CAPEM \$NAME)/' organizations/ccp-generate.sh
+  LC_ALL=C grep -rIlE '[oO]rg[12]' network.sh setOrgEnv.sh organizations/ccp-generate.sh organizations/fabric-ca organizations/cryptogen compose configtx scripts \
+    | LC_ALL=C xargs perl -pi -e 's/org1/bank/g; s/Org1/Bank/g; s/org2/users/g; s/Org2/Users/g'
+  cd ..
+fi
+
+# 2. Сеть, канал и контракт. InitLedger вызывается при деплое от имени администратора Bank
+cd test-network-2025
+./network.sh down
+./network.sh up createChannel -ca -c blockchain2025
+./network.sh deployCC -c blockchain2025 -ccn traffic -ccp "$ROOT/backend" -ccl javascript -cci InitLedger
+
+# 3. Стартовые пользователи организации Users. ivanov — сотрудник ДПС
+export PATH=$PWD/../bin:$PATH
+export FABRIC_CA_CLIENT_HOME=$PWD/organizations/peerOrganizations/users.example.com
+CA_CERT=$PWD/organizations/fabric-ca/users/ca-cert.pem
+create_user() {  # create_user <имя> <пароль> <роль>
+  fabric-ca-client register --caname ca-users --id.name "$1" --id.secret "$2" --id.type client \
+    --id.affiliation users.department1 --id.attrs "role=$3:ecert" --tls.certfiles "$CA_CERT"
+  fabric-ca-client enroll -u "https://$1:$2@localhost:8054" --caname ca-users --tls.certfiles "$CA_CERT" \
+    -M "$PWD/organizations/peerOrganizations/users.example.com/users/$1@users.example.com/msp"
+}
+create_user ivanov ivanovpw dps
+create_user semenov semenovpw driver
+create_user petrov petrovpw driver
+
+# 4. API и интерфейс
+cd "$ROOT/backend" && npm install
+node api.js &
+cd "$ROOT/front" && npm install && npx vite --host --port 3005

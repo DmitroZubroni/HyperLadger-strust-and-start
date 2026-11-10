@@ -1,0 +1,173 @@
+# Модуль Б: «Безопасное дорожное движение»
+
+Водитель добавляет удостоверение и транспорт, продлевает права и платит штрафы. Сотрудник ДПС выписывает штрафы. Все штрафы поступают на счёт банка. Все данные хранятся в блокчейне Hyperledger Fabric.
+
+```
+Браузер (React, порт 3005) → API (Express, порт 8091) → Сеть Fabric: организации Bank и Users, канал blockchain2025
+```
+
+Общая инструкция по разработке на Fabric — [GUIDE.md](../GUIDE.md), команды — [COMMANDS.md](../COMMANDS.md).
+
+## 1. Установка
+
+Ubuntu, виртуальная машина или WSL 2. Нужны Git, cURL, jq, Docker и Node.js 22.12+. Fabric ставится в корень репозитория, рядом с папкой `2025_B1`:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git curl jq docker-compose
+sudo usermod -a -G docker $USER                       # затем войдите в систему заново
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt-get install -y nodejs
+
+curl -sSLO https://raw.githubusercontent.com/hyperledger/fabric/main/scripts/install-fabric.sh
+chmod +x install-fabric.sh
+./install-fabric.sh docker samples binary
+docker pull hyperledger/fabric-nodeenv:2.5
+```
+
+## 2. Запуск
+
+```bash
+./2025_B1/Start1
+```
+
+Откройте http://localhost:3005. `Start1` выполняет по порядку:
+
+1. Один раз создаёт `fabric-samples/test-network-2025` — копию тестовой сети, где организации Org1 и Org2 переименованы в Bank и Users.
+2. Поднимает сеть с центрами сертификации и каналом `blockchain2025`.
+3. Деплоит контракт `traffic` и вызывает `InitLedger`: счёт банка 1000 ProfiCoin, база удостоверений и три водителя.
+4. Создаёт в CA организации Users стартовых пользователей `ivanov` (сотрудник ДПС), `semenov` и `petrov`.
+5. Запускает API и интерфейс.
+
+Остановка: `Ctrl+C`, затем `./network.sh down` в папке `fabric-samples/test-network-2025`. Данные при этом удаляются.
+
+| Вход на сайте | Кто это |
+| --- | --- |
+| `Admin@bank.example.com` | Банк, создаётся вместе с сетью |
+| `ivanov@users.example.com` | Иванов Иван Иванович: сотрудник ДПС и водитель |
+| `semenov@users.example.com` | Семенов Семен Семенович |
+| `petrov@users.example.com` | Петров Петр Петрович |
+
+## 3. Файлы
+
+```
+2025_B1/
+├── Start1                 запуск всего решения
+├── backend/
+│   ├── contract.js        смарт-контракт
+│   ├── api.js             API рядом с контрактом
+│   └── package.json       зависимости контракта в dependencies, API в devDependencies
+└── front/src/
+    ├── core/context.jsx   AtlantContext: пользователь, get и post к API
+    ├── core/routing.jsx   маршруты: / — личный кабинет, /func — функции
+    ├── ui/component/      Header, Authorization, func/ — форма на каждую функцию контракта
+    └── ui/pages/          UserInfo — личный кабинет, Function — вкладки с функциями
+```
+
+## 4. Сеть и организации
+
+| Организация | MSP | Кто в ней | Как контракт узнаёт роль |
+| --- | --- | --- | --- |
+| Bank | `BankMSP` | Аккаунт банка `Admin@bank.example.com` | любой пользователь `BankMSP` — банк |
+| Users | `UsersMSP` | Водители и сотрудник ДПС | водитель — запись в реестре, сотрудник ДПС — атрибут `role=dps` в сертификате |
+
+Имя водителя контракт берёт из сертификата (поле `CN`), поэтому подставить чужое имя нельзя.
+
+## 5. Смарт-контракт
+
+Код и описание каждой функции — в `backend/contract.js`. Аргументы передаются строками, ответ — JSON.
+
+| Функция | Кто вызывает | Параметры | Результат |
+| --- | --- | --- | --- |
+| `InitLedger` | Деплой, один раз | — | `{ok, message}`: счёт банка 1000, база удостоверений, водители Иванов, Семенов, Петров по 50 ProfiCoin |
+| `RegisterDriver` | Пользователь Users | `fullName` — ФИО, `experienceStartYear` — год начала стажа | `{ok, message}` |
+| `AddLicense` | Водитель | `number`, `expiresAt` в виде ДД.ММ.ГГГГ, `category` A, B или C | `{ok, message}`. Отказ, если удостоверения нет в базе, данные не совпадают или оно закреплено за другим водителем |
+| `RegisterVehicle` | Водитель | `category`, `marketValue` — стоимость в ProfiCoin, `serviceLife` — лет | `{ok, message}`. Отказ, если категория не совпадает с удостоверением |
+| `RenewLicense` | Водитель | — | `{ok, message}`. Продление на 10 лет, если до конца срока месяц или меньше и все штрафы оплачены |
+| `IssueFine` | Сотрудник ДПС | `licenseNumber` — номер удостоверения | `{ok, message, fineId}` |
+| `PayFine` | Водитель | `fineId` — ID штрафа | `{ok, message}`. 5 ProfiCoin в первые 5 минут, затем 10. Деньги уходят банку |
+| `GetMyProfile` | Водитель | — | Данные водителя: стаж, баланс, удостоверение, ТС, штрафы с текущей суммой, сообщения |
+| `GetBankAccount` | Банк | — | `{balance, payments}` |
+
+Правила, важные для проверки:
+
+- **Время.** 1 день задания = 1 минута, поэтому скидка на штраф действует 5 минут. Время берётся из транзакции, а не из часов компьютера: иначе пиры получили бы разный результат.
+- **Отказ ДПС.** Отказ записывается в сообщения водителя и возвращается как `{ok: false, message}`. Транзакция при этом проходит, поэтому сообщение сохраняется в реестре.
+- **Ошибки доступа.** Если функцию вызвал не тот пользователь, контракт выбрасывает ошибку, и в реестр ничего не записывается.
+- **Срок удостоверения.** При добавлении удостоверения срок не проверяется: в сценарии задания добавляются и истёкшие права. Срок важен только для продления и сравнивается с настоящей датой.
+
+## 6. API
+
+Такой же, как в базовом задании. Имя пользователя (`ivanov@users.example.com`) передаётся в заголовке `Authorization`, организация берётся из части после `@`.
+
+| Маршрут | Что передаётся | Что делает |
+| --- | --- | --- |
+| `GET /contract/<функция>` | аргументы в адресе: `?args=a&args=b` | Чтение, блок не создаётся |
+| `POST /contract/<функция>` | тело `{args: []}` | Запись в блок |
+
+```bash
+curl -s localhost:8091/contract/GetBankAccount -H "Authorization: Admin@bank.example.com"
+curl -s -X POST localhost:8091/contract/IssueFine -H "Authorization: ivanov@users.example.com" \
+  -H 'Content-Type: application/json' -d '{"args":["111"]}'
+```
+
+## 7. Интерфейс
+
+- **Личный кабинет** (`/`): у банка — баланс и поступления, у водителя — данные, удостоверение, ТС, штрафы с кнопкой оплаты и сообщения ДПС. Кнопка «обновить» перечитывает данные из блокчейна.
+- **Функции** (`/func`): вкладки «Регистрация водителя», «Водитель» и «Сотрудник ДПС». На каждой вкладке — по форме на функцию контракта. Результат и отказы ДПС показываются уведомлением.
+
+## 8. Новый водитель
+
+Пользователь создаётся в терминале из папки `fabric-samples/test-network-2025`, затем регистрируется на сайте.
+
+```bash
+NAME=romanov PASSWORD=romanovpw ROLE=driver          # для сотрудника ДПС: ROLE=dps
+export PATH=$PWD/../bin:$PATH
+export FABRIC_CA_CLIENT_HOME=$PWD/organizations/peerOrganizations/users.example.com
+
+fabric-ca-client register --caname ca-users --id.name $NAME --id.secret $PASSWORD --id.type client \
+  --id.affiliation users.department1 --id.attrs "role=$ROLE:ecert" \
+  --tls.certfiles $PWD/organizations/fabric-ca/users/ca-cert.pem
+
+fabric-ca-client enroll -u https://$NAME:$PASSWORD@localhost:8054 --caname ca-users \
+  --tls.certfiles $PWD/organizations/fabric-ca/users/ca-cert.pem \
+  -M $PWD/organizations/peerOrganizations/users.example.com/users/$NAME@users.example.com/msp
+```
+
+Затем войдите как `romanov@users.example.com` и на вкладке «Регистрация водителя» укажите ФИО и год начала стажа. Пароль нужен только в терминале, на сайте вход идёт по имени.
+
+## 9. Демонстрация по заданию
+
+Перед началом создайте в терминале `romanov` и `dmitriev` командами из раздела 8. Год начала стажа — текущий год минус стаж.
+
+| Шаг | Вход | Где | Действие | Ожидаемый результат |
+| --- | --- | --- | --- | --- |
+| 1 | `Admin@bank.example.com` | Личный кабинет | — | 1000 ProfiCoin |
+| 2 | `romanov@...` | Регистрация водителя | ФИО, стаж 6 лет | Баланс 50 |
+| 3 | `dmitriev@...` | Регистрация водителя | ФИО, стаж 3 года | Баланс 50 |
+| 4 | `dmitriev@...` | Водитель → AddLicense | 111, 12.05.2025, B | Подтверждено |
+| 5 | `semenov@...` | Водитель → AddLicense | 222, 09.09.2020, C | Подтверждено |
+| 6 | `petrov@...` | Водитель → AddLicense | 222, 09.09.2020, C | Отказ: закреплено за другим |
+| 7 | `romanov@...` | Водитель → AddLicense | 111, 12.05.2025, B | Отказ: закреплено за другим |
+| 8 | `romanov@...` | Водитель → AddLicense | 333, 13.02.2027, A | Подтверждено |
+| 9 | `petrov@...` | Водитель → AddLicense | 444, 10.09.2020, B | Подтверждено |
+| 10 | `petrov@...` | Водитель → RegisterVehicle | B | ТС зарегистрировано |
+| 11 | `dmitriev@...` | Водитель → RegisterVehicle | B | ТС зарегистрировано |
+| 12 | `semenov@...` | Водитель → RegisterVehicle | A | Отказ: категория не совпадает |
+| 13 | `romanov@...` | Водитель → RegisterVehicle | C | Отказ: категория не совпадает |
+| 14 | `ivanov@...` | Сотрудник ДПС → IssueFine | 111 | Штраф Дмитриеву |
+| 15 | `ivanov@...` | Сотрудник ДПС → IssueFine | 444 | Штраф Петрову |
+| 16 | `dmitriev@...` | Личный кабинет → оплатить | — | Баланс 45, у банка 1005 |
+| 17 | `petrov@...` | Личный кабинет → оплатить | — | Баланс 45, у банка 1010 |
+
+Сообщения ДПС видны в личном кабинете водителя. Шаги 16 и 17 нужно выполнить в течение 5 минут после выписки штрафа, иначе штраф будет стоить 10 ProfiCoin.
+
+## 10. Частые ошибки
+
+| Ошибка | Причина | Решение |
+| --- | --- | --- |
+| `Пользователь не найден` | Нет папки пользователя или введено короткое имя | Войдите по полному имени, например `ivanov@users.example.com`; создайте пользователя командами из раздела 8 |
+| `Водитель ... не зарегистрирован` | Пользователь есть в сети, но не в контракте | Вкладка «Регистрация водителя» |
+| `Доступ только для сотрудника ДПС` | У пользователя нет атрибута `role=dps` | Создайте сотрудника с `ROLE=dps` |
+| `Порт 8091 занят` | Запущен другой API, например базового задания | Остановите его: `pkill -f "node api.js"` |
+| `port is already allocated` | Запущена другая сеть Fabric | `./network.sh down` в папке той сети |
