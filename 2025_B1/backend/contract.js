@@ -253,8 +253,11 @@ class TrafficContract extends Contract {
         if (!CATEGORIES.includes(vehicleCategory)) {
             throw new Error('Категория ТС должна быть A, B или C');
         }
-        if (!Number.isFinite(value) || value <= 0 || !Number.isFinite(life) || life < 0) {
-            throw new Error('Некорректная стоимость или срок эксплуатации ТС');
+        if (!Number.isInteger(value) || value < 1 || value > 1000000000) {
+            throw new Error('Стоимость ТС: целое число от 1 до 1 000 000 000 ProfiCoin');
+        }
+        if (!Number.isInteger(life) || life < 0 || life > 100) {
+            throw new Error('Срок эксплуатации ТС: целое число лет от 0 до 100');
         }
         if (!driver.license) {
             return reject(ctx, driver, 'Отказ ДПС: сначала добавьте водительское удостоверение');
@@ -304,7 +307,10 @@ class TrafficContract extends Contract {
     async IssueFine(ctx, licenseNumber) {
         requireDps(ctx);
         const license = await readJson(ctx, licenseKey(String(licenseNumber).trim()));
-        if (!license || !license.owner) {
+        if (!license) {
+            throw new Error(`Удостоверения ${licenseNumber} нет в базе`);
+        }
+        if (!license.owner) {
             throw new Error(`Удостоверение ${licenseNumber} не закреплено ни за одним водителем`);
         }
         const driver = await readJson(ctx, driverKey(license.owner));
@@ -313,6 +319,13 @@ class TrafficContract extends Contract {
         driver.fines.push({ id: fineId, issuedAtSeconds: now, issuedAt: toIso(now), issuedBy: callerLogin(ctx), paidAt: null, paidAmount: null });
         addMessage(ctx, driver, 'info', `Выписан штраф по удостоверению ${license.number}`);
         await writeJson(ctx, driverKey(driver.login), driver);
+
+        // Если сотрудник ДПС сам водитель, запись о выписанном штрафе появится и в его истории
+        const officer = await readJson(ctx, driverKey(callerLogin(ctx)));
+        if (officer && officer.login !== driver.login) {
+            addMessage(ctx, officer, 'info', `Вы выписали штраф водителю ${driver.fullName} по удостоверению ${license.number}`);
+            await writeJson(ctx, driverKey(officer.login), officer);
+        }
         return JSON.stringify({ ok: true, message: `Штраф выписан водителю ${driver.fullName}`, fineId });
     }
 
@@ -326,7 +339,7 @@ class TrafficContract extends Contract {
         const driver = await currentDriver(ctx);
         const fine = driver.fines.find((item) => item.id === fineId);
         if (!fine) {
-            throw new Error('Штраф не найден');
+            throw new Error('У вас нет штрафа с таким ID');
         }
         if (fine.paidAt) {
             return reject(ctx, driver, 'Отказ: штраф уже оплачен');
@@ -344,6 +357,21 @@ class TrafficContract extends Contract {
         fine.paidAmount = amount;
         await writeJson(ctx, BANK_KEY, bank);
         return accept(ctx, driver, `Штраф оплачен: ${amount} ProfiCoin`);
+    }
+
+    /**
+     * Кто вызвал: используется интерфейсом при входе, чтобы показать нужные функции.
+     * @returns {string} JSON { login, isBank, isDps, isDriver }
+     */
+    async WhoAmI(ctx) {
+        const isUsers = ctx.clientIdentity.getMSPID() === USERS_MSP;
+        const login = callerLogin(ctx);
+        return JSON.stringify({
+            login,
+            isBank: ctx.clientIdentity.getMSPID() === BANK_MSP,
+            isDps: isUsers && callerRole(ctx) === ROLE_DPS,
+            isDriver: isUsers && Boolean(await readJson(ctx, driverKey(login))),
+        });
     }
 
     /**

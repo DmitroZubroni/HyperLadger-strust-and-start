@@ -1,11 +1,9 @@
 import { useContext } from "react";
-import { Tabs, Tab } from "react-bootstrap";
+import { Tabs, Tab, Alert } from "react-bootstrap";
 import { AtlantContext } from "../../core/context.jsx";
 
 import Header from "../component/Header.jsx";
 import Authorization from "../component/Authorization.jsx";
-
-import RegisterDriver from "../component/func/RegisterDriver.jsx";
 
 import AddLicense from "../component/func/AddLicense.jsx";
 import RegisterVehicle from "../component/func/RegisterVehicle.jsx";
@@ -14,8 +12,9 @@ import PayFine from "../component/func/PayFine.jsx";
 
 import IssueFine from "../component/func/IssueFine.jsx";
 
+// Вкладки по ролям: водителю — функции водителя, сотруднику ДПС — выписка штрафов
 const Function = () => {
-    const { isAuthorized } = useContext(AtlantContext);
+    const { isAuthorized, isBank, isDps, isDriver } = useContext(AtlantContext);
 
     return (
         <div>
@@ -25,24 +24,25 @@ const Function = () => {
                 <Authorization />
             ) : (
                 <div className="container">
+                    {isBank && <Alert>У банка нет функций: штрафы поступают на счёт автоматически, баланс — в личном кабинете.</Alert>}
                     <Tabs>
-                        <Tab eventKey="register" title="Регистрация водителя">
-                            <RegisterDriver />
-                        </Tab>
+                        {isDriver && (
+                            <Tab eventKey="driver" title="Водитель">
+                                <AddLicense />
+                                <hr />
+                                <RegisterVehicle />
+                                <hr />
+                                <RenewLicense />
+                                <hr />
+                                <PayFine />
+                            </Tab>
+                        )}
 
-                        <Tab eventKey="driver" title="Водитель">
-                            <AddLicense />
-                            <hr />
-                            <RegisterVehicle />
-                            <hr />
-                            <RenewLicense />
-                            <hr />
-                            <PayFine />
-                        </Tab>
-
-                        <Tab eventKey="dps" title="Сотрудник ДПС">
-                            <IssueFine />
-                        </Tab>
+                        {isDps && (
+                            <Tab eventKey="dps" title="Сотрудник ДПС">
+                                <IssueFine />
+                            </Tab>
+                        )}
                     </Tabs>
                 </div>
             )}

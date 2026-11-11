@@ -1,13 +1,17 @@
 import { Container, Row, Col, Card, Alert, Button, Table } from "react-bootstrap";
 import Header from "../component/Header.jsx";
 import { AtlantContext } from "../../core/context.jsx";
-import { useContext, useEffect, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import Authorization from "../component/Authorization.jsx";
 
 const UserInfo = () => {
-    const { user, isBank, get, post } = useContext(AtlantContext);
+    const { user, isBank, isDps, isDriver, get, post } = useContext(AtlantContext);
     const [data, setData] = useState(null);
     const [error, setError] = useState("");
+    // ID штрафа, который сейчас оплачивается: кнопка блокируется, чтобы не оплатить дважды.
+    // busy срабатывает сразу, ещё до перерисовки кнопки, поэтому повторный клик не отправит запрос
+    const [paying, setPaying] = useState("");
+    const busy = useRef(false);
 
     // Личный кабинет банка или водителя: данные читаются из контракта.
     // forUser — для кого загружены данные, чтобы после смены пользователя не показать чужие
@@ -16,8 +20,10 @@ const UserInfo = () => {
             let result;
             if (isBank) {
                 result = await get("GetBankAccount");
-            } else {
+            } else if (isDriver) {
                 result = await get("GetMyProfile");
+            } else {
+                result = {};
             }
             setData({ ...result, forUser: user });
             setError("");
@@ -35,8 +41,13 @@ const UserInfo = () => {
     const ready = data && data.forUser === user;
 
     const payFine = async (fineId) => {
+        if (busy.current) return;
+        busy.current = true;
+        setPaying(fineId);
         await post("PayFine", [fineId]);
-        load();
+        await load();
+        setPaying("");
+        busy.current = false;
     };
 
     return (
@@ -50,7 +61,16 @@ const UserInfo = () => {
                     <Button onClick={load}>обновить</Button>
                     <hr />
 
-                    {error && <Alert variant="warning">{error}. Водитель регистрируется на странице «функции».</Alert>}
+                    {error && <Alert variant="warning">{error}</Alert>}
+
+                    {ready && isDps && !isDriver && (
+                        <Card className="container">
+                            <Card.Body>
+                                <Card.Title>Сотрудник ДПС</Card.Title>
+                                <p>Выписка штрафов — на странице «функции». Водителем вы не зарегистрированы.</p>
+                            </Card.Body>
+                        </Card>
+                    )}
 
                     {ready && isBank && (
                         <Card className="container">
@@ -74,7 +94,7 @@ const UserInfo = () => {
                         </Card>
                     )}
 
-                    {ready && !isBank && (
+                    {ready && isDriver && (
                         <Row>
                             <Col>
                                 <Card className="container">
@@ -88,7 +108,7 @@ const UserInfo = () => {
                                             ? `№ ${data.license.number}, категория ${data.license.category}, до ${data.license.expiresAt}`
                                             : "нет"}</p>
                                         <p>Транспортные средства: {data.vehicles.length === 0 ? "нет" : data.vehicles
-                                            .map((v) => `категория ${v.category}, ${v.marketValue} ProfiCoin, ${v.serviceLife} лет`)
+                                            .map((v) => `${v.marketValue} ProfiCoin, ${v.serviceLife} лет`)
                                             .join("; ")}</p>
                                     </Card.Body>
                                 </Card>
@@ -104,7 +124,9 @@ const UserInfo = () => {
                                                 <p>Выписан: {new Date(fine.issuedAt).toLocaleString()}</p>
                                                 {fine.paidAt
                                                     ? <p>Оплачен: {fine.paidAmount} ProfiCoin</p>
-                                                    : <Button onClick={() => payFine(fine.id)}>оплатить {fine.currentAmount} ProfiCoin</Button>}
+                                                    : <Button disabled={paying === fine.id} onClick={() => payFine(fine.id)}>
+                                                        {paying === fine.id ? "оплата..." : `оплатить ${fine.currentAmount} ProfiCoin`}
+                                                    </Button>}
                                                 <hr />
                                             </div>
                                         ))}
