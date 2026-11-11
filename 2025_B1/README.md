@@ -47,18 +47,19 @@ front/  ── POST /register ──►  backend/api.js  ── fabric-ca-client
 
 Файл читается сверху вниз в таком порядке:
 
-1. **Константы:** организации (`BANK_MSP`, `USERS_MSP`), стоимость штрафа, срок скидки, `SECONDS_PER_GAME_DAY = 60` (1 день задания = 1 минута), база удостоверений `LICENSE_BASE` и стартовые водители `INITIAL_DRIVERS`.
+1. **Константы:** организации (`BANK_MSP`, `USERS_MSP`), суммы штрафа, срок скидки `DISCOUNT_MS` (5 дней задания = 5 минут), база удостоверений `LICENSES` и стартовые водители `DRIVERS`. Даты хранятся в формате ГГГГ-ММ-ДД: его понимает встроенный `Date`, а поле `<input type="date">` на сайте отдаёт именно его.
 2. **Вспомогательные функции**, их нельзя вызвать из сети:
 
 | Функция | Что делает |
 | --- | --- |
-| `readJson`, `writeJson` | Читают и пишут JSON в реестр через `ctx.stub.getState` и `putState` |
-| `txSeconds` | Время транзакции. Используется вместо `Date.now()`, чтобы все пиры получили одно значение |
+| `read`, `write` | Читают и пишут JSON в реестр через `ctx.stub.getState` и `putState` |
 | `callerLogin` | Имя вызывающего из сертификата (поле `CN`) |
-| `requireBank`, `requireDps` | Проверки ролей: банк — организация Bank, ДПС — атрибут `role=dps` |
+| `isDps` | Сотрудник ДПС: организация Users и атрибут `role=dps`, проверка методом библиотеки `assertAttributeValue` |
 | `currentDriver` | Запись водителя, который вызвал функцию |
-| `accept`, `reject` | Записывают сообщение водителю и возвращают `{ok: true или false, message}` |
-| `fineAmount` | Сумма штрафа на текущий момент: 5 или 10 |
+| `answer` | Записывает сообщение водителю и возвращает `{ok, message}` |
+| `fineAmount` | Сумма штрафа сейчас: 5 или 10 |
+
+Время везде берётся из транзакции: `ctx.stub.getDateTimestamp()` возвращает обычный `Date`, одинаковый на всех пирах. `Date.now()` использовать нельзя: у пиров он разный.
 
 3. **Класс `TrafficContract`:** каждый его метод — функция, доступная из сети. Список с параметрами — в разделе 5 [INSTRUCTION.md](INSTRUCTION.md).
 
@@ -75,19 +76,19 @@ front/  ── POST /register ──►  backend/api.js  ── fabric-ca-client
 ```js
 async AddLicense(ctx, number, expiresAt, category) {
     const driver = await currentDriver(ctx);                 // кто вызвал, иначе ошибка
-    const license = await readJson(ctx, licenseKey(number)); // читаем реестр
+    const license = await read(ctx, 'license:' + number);    // читаем реестр
     if (!license) {
-        return reject(ctx, driver, 'Отказ ДПС: ...');       // отказ: сообщение сохраняется
+        return answer(ctx, driver, false, 'Отказ ДПС: ...'); // отказ: сообщение сохраняется
     }
     ...
-    await writeJson(ctx, licenseKey(license.number), license); // пишем реестр
-    return accept(ctx, driver, 'ДПС подтвердила ...');       // успех: сообщение и ответ
+    await write(ctx, 'license:' + number, license);          // пишем реестр
+    return answer(ctx, driver, true, 'ДПС подтвердила ...'); // успех: сообщение и ответ
 }
 ```
 
 Есть два вида неудачи:
 
-- **Отказ по правилам** (`reject`): чужое удостоверение, неверная категория. Транзакция проходит, сообщение остаётся у водителя в кабинете.
+- **Отказ по правилам** (`answer` с `false`): чужое удостоверение, неверная категория. Транзакция проходит, сообщение остаётся у водителя в кабинете.
 - **Ошибка** (`throw new Error`): нет прав, неверные данные. Транзакция отменяется, в реестр ничего не пишется.
 
 ## 4. Как написан API: `backend/api.js`
@@ -202,7 +203,6 @@ fabric-ca-client register --caname ca-users --id.name $NAME --id.secret $PASSWOR
 | --- | --- |
 | Неверный пароль или несуществующее имя | «Неверное имя или пароль» |
 | Регистрация с занятым именем | «Имя ... уже занято» |
-| Имя кириллицей | «Имя: латинские буквы, цифры, _ и -» |
 | API перезапущен, а страница открыта | «Требуется вход»: войдите снова |
 | Водитель пытается выписать штраф | «Доступ только для сотрудника ДПС» |
 
@@ -216,7 +216,7 @@ fabric-ca-client register --caname ca-users --id.name $NAME --id.secret $PASSWOR
 async TopUp(ctx, amount) {
     const driver = await currentDriver(ctx);
     driver.balance += Number(amount);
-    return accept(ctx, driver, 'Баланс пополнен на ' + amount);
+    return answer(ctx, driver, true, 'Баланс пополнен на ' + amount);
 }
 ```
 

@@ -2,158 +2,95 @@
 /**
  * Смарт-контракт «Безопасное дорожное движение».
  *
- * Правила, которые определяют устройство кода:
- *
- * 1. Время берётся только из ctx.stub.getTxTimestamp(). Date.now() дал бы на
- *    разных пирах разные значения, и транзакция не прошла бы проверку.
- * 2. Отказ по бизнес-правилу (чужое удостоверение, неверная категория) не
- *    бросает исключение: исключение откатывает транзакцию, и сообщение водителю
- *    не сохранилось бы. Отказ записывается в сообщения и возвращается как ok:false.
- * 3. Исключение бросается только при нарушении доступа и некорректных данных.
- *    В этих случаях в реестр ничего не записывается.
- * 4. Кто вызвал функцию, определяется по сертификату: организация (MSP),
- *    логин (CN) и роль (атрибут role). Параметрам запроса контракт не доверяет.
+ * Как устроен:
+ * 1. Кто вызвал функцию, контракт узнаёт по сертификату: организация (MSP), имя (CN)
+ *    и роль (атрибут role). Параметрам запроса контракт не доверяет.
+ * 2. Время берётся из транзакции: ctx.stub.getDateTimestamp(). Date.now() дал бы на разных
+ *    пирах разные значения, и транзакция не прошла бы проверку.
+ * 3. Отказ по правилам задания (чужое удостоверение, неверная категория) записывается в
+ *    сообщения водителя и возвращается как { ok: false }: транзакция проходит, сообщение
+ *    сохраняется. Нарушение доступа — исключение, тогда в реестр ничего не пишется.
+ * 4. Даты хранятся в формате ГГГГ-ММ-ДД, его понимает встроенный Date.
  */
 const { Contract } = require('fabric-contract-api');
 
 const BANK_MSP = 'BankMSP';
 const USERS_MSP = 'UsersMSP';
-const ROLE_DPS = 'dps';
 
-const BANK_KEY = 'bank';
 const START_BANK_BALANCE = 1000;
 const START_DRIVER_BALANCE = 50;
+const FINE = 10;
+const FINE_WITH_DISCOUNT = 5;
+const DISCOUNT_MS = 5 * 60 * 1000;   // 5 дней задания, 1 день = 1 минута
+const RENEWAL_YEARS = 10;            // срок продления в задании не задан, как у настоящих прав
 
-const FINE_FULL = 10;
-const FINE_DISCOUNT = 5;
-const DISCOUNT_DAYS = 5;
-const SECONDS_PER_GAME_DAY = 60;       // 1 день в задании = 1 минута реального времени
-const RENEWAL_YEARS = 10;              // срок продления: в задании не задан, как у реальных прав
-
-const CATEGORIES = ['A', 'B', 'C'];
-
-// Таблица 1 задания: база водительских удостоверений службы ДПС
-const LICENSE_BASE = [
-    { number: '000', expiresAt: '11.01.2021', category: 'A' },
-    { number: '111', expiresAt: '12.05.2025', category: 'B' },
-    { number: '222', expiresAt: '09.09.2020', category: 'C' },
-    { number: '333', expiresAt: '13.02.2027', category: 'A' },
-    { number: '444', expiresAt: '10.09.2020', category: 'B' },
-    { number: '555', expiresAt: '24.06.2029', category: 'C' },
-    { number: '666', expiresAt: '31.03.2030', category: 'A' },
+// Таблица 1 задания: база водительских удостоверений
+const LICENSES = [
+    { number: '000', expiresAt: '2021-01-11', category: 'A' },
+    { number: '111', expiresAt: '2025-05-12', category: 'B' },
+    { number: '222', expiresAt: '2020-09-09', category: 'C' },
+    { number: '333', expiresAt: '2027-02-13', category: 'A' },
+    { number: '444', expiresAt: '2020-09-10', category: 'B' },
+    { number: '555', expiresAt: '2029-06-24', category: 'C' },
+    { number: '666', expiresAt: '2030-03-31', category: 'A' },
 ];
 
-// Логины и стаж стартовых пользователей
-const INITIAL_DRIVERS = [
+// Водители при старте системы: логин, ФИО и стаж в годах
+const DRIVERS = [
     { login: 'ivanov', fullName: 'Иванов Иван Иванович', experience: 2 },
     { login: 'semenov', fullName: 'Семенов Семен Семенович', experience: 5 },
     { login: 'petrov', fullName: 'Петров Петр Петрович', experience: 10 },
 ];
 
-const driverKey = (login) => `driver:${login}`;
-const licenseKey = (number) => `license:${number}`;
 
-/** Время транзакции в секундах. Одинаково на всех пирах. */
-function txSeconds(ctx) {
-    const { seconds } = ctx.stub.getTxTimestamp();
-    return typeof seconds.toNumber === 'function' ? seconds.toNumber() : Number(seconds);
+// ===== Вспомогательные функции: из сети не вызываются =====
+
+async function read(ctx, key) {
+    const data = await ctx.stub.getState(key);
+    if (data.length === 0) {
+        return null;
+    }
+    return JSON.parse(data.toString());
 }
 
-const toIso = (seconds) => new Date(seconds * 1000).toISOString();
-
-async function readJson(ctx, key) {
-    const bytes = await ctx.stub.getState(key);
-    return bytes && bytes.length > 0 ? JSON.parse(Buffer.from(bytes).toString('utf8')) : null;
-}
-
-async function writeJson(ctx, key, value) {
+async function write(ctx, key, value) {
     await ctx.stub.putState(key, Buffer.from(JSON.stringify(value)));
 }
 
-/** Логин вызывающего: поле CN его сертификата. */
+// Имя вызывающего: поле CN его сертификата
 function callerLogin(ctx) {
-    const match = /CN=([^/:,]+)/.exec(ctx.clientIdentity.getID());
-    if (!match) {
-        throw new Error('В сертификате не найден CN');
-    }
-    return match[1];
+    return /CN=([^/:,]+)/.exec(ctx.clientIdentity.getID())[1];
 }
 
-const callerRole = (ctx) => ctx.clientIdentity.getAttributeValue('role');
-
-// Банк — любой пользователь организации Bank
-function requireBank(ctx) {
-    if (ctx.clientIdentity.getMSPID() !== BANK_MSP) {
-        throw new Error('Доступ только для аккаунта банка');
-    }
+function isDps(ctx) {
+    return ctx.clientIdentity.getMSPID() === USERS_MSP && ctx.clientIdentity.assertAttributeValue('role', 'dps');
 }
 
-// Сотрудник ДПС — пользователь Users с атрибутом role=dps в сертификате
-function requireDps(ctx) {
-    if (ctx.clientIdentity.getMSPID() !== USERS_MSP || callerRole(ctx) !== ROLE_DPS) {
-        throw new Error('Доступ только для сотрудника ДПС');
-    }
-}
-
-/** Запись водителя, от имени которого выполняется вызов. */
+// Водитель, который вызвал функцию
 async function currentDriver(ctx) {
-    if (ctx.clientIdentity.getMSPID() !== USERS_MSP) {
-        throw new Error('Функция доступна только пользователям организации Users');
-    }
-    const login = callerLogin(ctx);
-    const driver = await readJson(ctx, driverKey(login));
-    if (!driver) {
-        throw new Error(`Водитель ${login} не зарегистрирован`);
+    const driver = await read(ctx, 'driver:' + callerLogin(ctx));
+    if (!driver || ctx.clientIdentity.getMSPID() !== USERS_MSP) {
+        throw new Error('Вы не зарегистрированы как водитель');
     }
     return driver;
 }
 
-function addMessage(ctx, driver, type, text) {
-    driver.messages.push({ at: toIso(txSeconds(ctx)), type, text });
+// Сохраняет сообщение в кабинете водителя и возвращает ответ { ok, message }
+async function answer(ctx, driver, ok, text) {
+    driver.messages.push({ at: ctx.stub.getDateTimestamp().toISOString(), ok: ok, text: text });
+    await write(ctx, 'driver:' + driver.login, driver);
+    return JSON.stringify({ ok: ok, message: text });
 }
 
-/** Отказ: сообщение сохраняется в кабинете водителя, транзакция не откатывается. */
-async function reject(ctx, driver, text) {
-    addMessage(ctx, driver, 'error', text);
-    await writeJson(ctx, driverKey(driver.login), driver);
-    return JSON.stringify({ ok: false, message: text });
+// Сумма штрафа сейчас: со скидкой в первые 5 дней
+function fineAmount(ctx, fine) {
+    const passed = ctx.stub.getDateTimestamp() - new Date(fine.issuedAt);
+    if (passed < DISCOUNT_MS) {
+        return FINE_WITH_DISCOUNT;
+    }
+    return FINE;
 }
 
-/** Успех: сообщение сохраняется в кабинете водителя. */
-async function accept(ctx, driver, text) {
-    addMessage(ctx, driver, 'info', text);
-    await writeJson(ctx, driverKey(driver.login), driver);
-    return JSON.stringify({ ok: true, message: text });
-}
-
-function newDriver(login, fullName, experienceStartYear) {
-    return {
-        login,
-        fullName,
-        experienceStartYear,
-        balance: START_DRIVER_BALANCE,
-        license: null,
-        vehicles: [],
-        fines: [],
-        messages: [],
-    };
-}
-
-/** Стоимость штрафа в момент времени nowSeconds. */
-function fineAmount(fine, nowSeconds) {
-    const elapsed = nowSeconds - fine.issuedAtSeconds;
-    return elapsed < DISCOUNT_DAYS * SECONDS_PER_GAME_DAY ? FINE_DISCOUNT : FINE_FULL;
-}
-
-/** Разбор даты ДД.ММ.ГГГГ. Возвращает [год, месяц от 1, день] или null. */
-function parseDate(text) {
-    const match = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(String(text).trim());
-    return match ? [Number(match[3]), Number(match[2]), Number(match[1])] : null;
-}
-
-function formatDate(year, month, day) {
-    return `${String(day).padStart(2, '0')}.${String(month).padStart(2, '0')}.${year}`;
-}
 
 class TrafficContract extends Contract {
     constructor() {
@@ -161,98 +98,106 @@ class TrafficContract extends Contract {
     }
 
     /**
-     * Начальное заполнение реестра: счёт банка (1000 ProfiCoin), база удостоверений
-     * и стартовые водители. Вызывается один раз при деплое: deployCC -cci InitLedger.
+     * Начальное заполнение: счёт банка, база удостоверений, стартовые водители.
+     * Вызывается один раз при деплое: deployCC -cci InitLedger.
      * @returns {string} JSON { ok, message }
      */
     async InitLedger(ctx) {
-        if (await readJson(ctx, BANK_KEY)) {
+        if (await read(ctx, 'bank')) {
             throw new Error('Реестр уже инициализирован');
         }
-        await writeJson(ctx, BANK_KEY, { balance: START_BANK_BALANCE, payments: [] });
-        for (const license of LICENSE_BASE) {
-            await writeJson(ctx, licenseKey(license.number), { ...license, owner: null });
+        await write(ctx, 'bank', { balance: START_BANK_BALANCE, payments: [] });
+        for (const license of LICENSES) {
+            license.owner = null;
+            await write(ctx, 'license:' + license.number, license);
         }
-        const year = new Date(txSeconds(ctx) * 1000).getUTCFullYear();
-        for (const item of INITIAL_DRIVERS) {
-            await writeJson(ctx, driverKey(item.login), newDriver(item.login, item.fullName, year - item.experience));
+        const year = ctx.stub.getDateTimestamp().getFullYear();
+        for (const driver of DRIVERS) {
+            await write(ctx, 'driver:' + driver.login, {
+                login: driver.login,
+                fullName: driver.fullName,
+                experienceStartYear: year - driver.experience,
+                balance: START_DRIVER_BALANCE,
+                license: null,
+                vehicles: [],
+                fines: [],
+                messages: [],
+            });
         }
-        return JSON.stringify({ ok: true, message: 'Реестр инициализирован' });
+        return JSON.stringify({ ok: true, message: 'Реестр заполнен' });
     }
 
     /**
-     * Самостоятельная регистрация водителя. Логин берётся из сертификата.
+     * Регистрация водителя. Логин берётся из сертификата.
      * @param {string} fullName ФИО
      * @param {string} experienceStartYear год начала водительского стажа
      * @returns {string} JSON { ok, message }
      */
     async RegisterDriver(ctx, fullName, experienceStartYear) {
-        if (ctx.clientIdentity.getMSPID() !== USERS_MSP) {
-            throw new Error('Водитель должен принадлежать организации Users');
-        }
         const login = callerLogin(ctx);
-        if (await readJson(ctx, driverKey(login))) {
-            throw new Error(`Водитель ${login} уже зарегистрирован`);
+        if (ctx.clientIdentity.getMSPID() !== USERS_MSP) {
+            throw new Error('Водитель должен быть из организации Users');
         }
-        const name = String(fullName).trim();
-        const startYear = Number(experienceStartYear);
-        const currentYear = new Date(txSeconds(ctx) * 1000).getUTCFullYear();
-        if (!name) {
-            throw new Error('Не указано ФИО');
+        if (await read(ctx, 'driver:' + login)) {
+            throw new Error('Водитель ' + login + ' уже зарегистрирован');
         }
-        if (!Number.isInteger(startYear) || startYear < 1900 || startYear > currentYear) {
-            throw new Error('Некорректный год начала стажа');
+        if (Number(experienceStartYear) > ctx.stub.getDateTimestamp().getFullYear()) {
+            throw new Error('Год начала стажа не может быть в будущем');
         }
-        await writeJson(ctx, driverKey(login), newDriver(login, name, startYear));
-        return JSON.stringify({ ok: true, message: `Водитель ${name} зарегистрирован` });
+        await write(ctx, 'driver:' + login, {
+            login: login,
+            fullName: fullName,
+            experienceStartYear: Number(experienceStartYear),
+            balance: START_DRIVER_BALANCE,
+            license: null,
+            vehicles: [],
+            fines: [],
+            messages: [],
+        });
+        return JSON.stringify({ ok: true, message: 'Водитель ' + fullName + ' зарегистрирован' });
     }
 
     /**
-     * Добавление удостоверения. Проверка ДПС выполняется автоматически:
-     * номер есть в базе, срок и категория совпадают, удостоверение не занято.
-     * Срок действия не проверяется: в сценарии задания добавляются и истёкшие права.
+     * Добавление удостоверения. ДПС проверяет автоматически: удостоверение есть в базе,
+     * срок и категория совпадают, оно ни за кем не закреплено. Истёкший срок не мешает:
+     * в сценарии задания добавляются и истёкшие права.
      * @param {string} number номер
-     * @param {string} expiresAt срок действия, ДД.ММ.ГГГГ
+     * @param {string} expiresAt срок действия, ГГГГ-ММ-ДД
      * @param {string} category категория A, B или C
      * @returns {string} JSON { ok, message }
      */
     async AddLicense(ctx, number, expiresAt, category) {
         const driver = await currentDriver(ctx);
+        const license = await read(ctx, 'license:' + number);
         if (driver.license) {
-            return reject(ctx, driver, `Отказ: у вас уже есть удостоверение ${driver.license.number}`);
+            return answer(ctx, driver, false, 'Отказ: у вас уже есть удостоверение ' + driver.license.number);
         }
-        const license = await readJson(ctx, licenseKey(String(number).trim()));
         if (!license) {
-            return reject(ctx, driver, `Отказ ДПС: удостоверения ${number} нет в базе`);
+            return answer(ctx, driver, false, 'Отказ ДПС: удостоверения ' + number + ' нет в базе');
         }
-        if (license.expiresAt !== String(expiresAt).trim() || license.category !== String(category).trim().toUpperCase()) {
-            return reject(ctx, driver, `Отказ ДПС: срок действия или категория удостоверения ${number} указаны неверно`);
+        if (license.expiresAt !== expiresAt || license.category !== category) {
+            return answer(ctx, driver, false, 'Отказ ДПС: срок действия или категория удостоверения ' + number + ' указаны неверно');
         }
         if (license.owner) {
-            return reject(ctx, driver, `Отказ ДПС: удостоверение ${number} уже закреплено за другим водителем`);
+            return answer(ctx, driver, false, 'Отказ ДПС: удостоверение ' + number + ' закреплено за другим водителем');
         }
         license.owner = driver.login;
-        await writeJson(ctx, licenseKey(license.number), license);
-        driver.license = { number: license.number, expiresAt: license.expiresAt, category: license.category };
-        return accept(ctx, driver, `ДПС подтвердила удостоверение ${license.number}`);
+        await write(ctx, 'license:' + number, license);
+        driver.license = { number: number, expiresAt: expiresAt, category: category };
+        return answer(ctx, driver, true, 'ДПС подтвердила удостоверение ' + number);
     }
 
     /**
-     * Запрос на регистрацию транспортного средства. Проверка автоматическая:
-     * категория ТС должна совпадать с категорией удостоверения.
+     * Регистрация транспортного средства: категория должна совпадать с удостоверением.
      * @param {string} category категория A, B или C
-     * @param {string} marketValue рыночная стоимость, ProfiCoin
-     * @param {string} serviceLife срок эксплуатации, лет
+     * @param {string} marketValue рыночная стоимость, целое число ProfiCoin от 1 до 1 000 000 000
+     * @param {string} serviceLife срок эксплуатации, целое число лет от 0 до 100
      * @returns {string} JSON { ok, message }
      */
     async RegisterVehicle(ctx, category, marketValue, serviceLife) {
         const driver = await currentDriver(ctx);
         const value = Number(marketValue);
         const life = Number(serviceLife);
-        const vehicleCategory = String(category).trim().toUpperCase();
-        if (!CATEGORIES.includes(vehicleCategory)) {
-            throw new Error('Категория ТС должна быть A, B или C');
-        }
         if (!Number.isInteger(value) || value < 1 || value > 1000000000) {
             throw new Error('Стоимость ТС: целое число от 1 до 1 000 000 000 ProfiCoin');
         }
@@ -260,43 +205,46 @@ class TrafficContract extends Contract {
             throw new Error('Срок эксплуатации ТС: целое число лет от 0 до 100');
         }
         if (!driver.license) {
-            return reject(ctx, driver, 'Отказ ДПС: сначала добавьте водительское удостоверение');
+            return answer(ctx, driver, false, 'Отказ ДПС: сначала добавьте водительское удостоверение');
         }
-        if (driver.license.category !== vehicleCategory) {
-            return reject(ctx, driver, `Отказ ДПС: категория ТС ${vehicleCategory} не совпадает с категорией удостоверения ${driver.license.category}`);
+        if (driver.license.category !== category) {
+            return answer(ctx, driver, false, 'Отказ ДПС: категория ТС ' + category
+                + ' не совпадает с категорией удостоверения ' + driver.license.category);
         }
-        driver.vehicles.push({ category: vehicleCategory, marketValue: value, serviceLife: life });
-        return accept(ctx, driver, `ДПС зарегистрировала ТС категории ${vehicleCategory}`);
+        driver.vehicles.push({ category: category, marketValue: value, serviceLife: life });
+        return answer(ctx, driver, true, 'ДПС зарегистрировала ТС категории ' + category);
     }
 
     /**
-     * Запрос на продление удостоверения. Условия: до окончания срока остался
-     * месяц или меньше (срок мог и истечь) и нет неоплаченных штрафов.
-     * Срок сравнивается с настоящей датой, так как даты в базе календарные.
+     * Продление удостоверения на 10 лет. Условия: до конца срока месяц или меньше
+     * (срок мог и истечь) и нет неоплаченных штрафов.
      * @returns {string} JSON { ok, message }
      */
     async RenewLicense(ctx) {
         const driver = await currentDriver(ctx);
         if (!driver.license) {
-            return reject(ctx, driver, 'Отказ ДПС: у вас нет удостоверения');
+            return answer(ctx, driver, false, 'Отказ ДПС: у вас нет удостоверения');
         }
         if (driver.fines.some((fine) => !fine.paidAt)) {
-            return reject(ctx, driver, 'Отказ ДПС: есть неоплаченные штрафы');
+            return answer(ctx, driver, false, 'Отказ ДПС: есть неоплаченные штрафы');
         }
-        const [year, month, day] = parseDate(driver.license.expiresAt);
-        const now = txSeconds(ctx) * 1000;
-        if (now < Date.UTC(year, month - 2, day)) {
-            return reject(ctx, driver, 'Отказ ДПС: до окончания срока действия больше месяца');
+        const now = ctx.stub.getDateTimestamp();
+        const expires = new Date(driver.license.expiresAt);
+        const monthBefore = new Date(expires);
+        monthBefore.setMonth(monthBefore.getMonth() - 1);
+        if (now < monthBefore) {
+            return answer(ctx, driver, false, 'Отказ ДПС: до окончания срока действия больше месяца');
         }
-        const expiry = Date.UTC(year, month - 1, day);
-        const from = new Date(Math.max(now, expiry));
-        const newExpiry = formatDate(from.getUTCFullYear() + RENEWAL_YEARS, from.getUTCMonth() + 1, from.getUTCDate());
+        // Новый срок считается от окончания старого, а если тот уже прошёл — от сегодня
+        const newExpires = new Date(Math.max(now, expires));
+        newExpires.setFullYear(newExpires.getFullYear() + RENEWAL_YEARS);
+        const expiresAt = newExpires.toISOString().slice(0, 10);
 
-        const license = await readJson(ctx, licenseKey(driver.license.number));
-        license.expiresAt = newExpiry;
-        await writeJson(ctx, licenseKey(license.number), license);
-        driver.license.expiresAt = newExpiry;
-        return accept(ctx, driver, `ДПС продлила удостоверение до ${newExpiry}`);
+        const license = await read(ctx, 'license:' + driver.license.number);
+        license.expiresAt = expiresAt;
+        await write(ctx, 'license:' + license.number, license);
+        driver.license.expiresAt = expiresAt;
+        return answer(ctx, driver, true, 'ДПС продлила удостоверение до ' + expiresAt);
     }
 
     /**
@@ -305,33 +253,31 @@ class TrafficContract extends Contract {
      * @returns {string} JSON { ok, message, fineId }
      */
     async IssueFine(ctx, licenseNumber) {
-        requireDps(ctx);
-        const license = await readJson(ctx, licenseKey(String(licenseNumber).trim()));
+        if (!isDps(ctx)) {
+            throw new Error('Доступ только для сотрудника ДПС');
+        }
+        const license = await read(ctx, 'license:' + licenseNumber);
         if (!license) {
-            throw new Error(`Удостоверения ${licenseNumber} нет в базе`);
+            throw new Error('Удостоверения ' + licenseNumber + ' нет в базе');
         }
         if (!license.owner) {
-            throw new Error(`Удостоверение ${licenseNumber} не закреплено ни за одним водителем`);
+            throw new Error('Удостоверение ' + licenseNumber + ' ни за кем не закреплено');
         }
-        const driver = await readJson(ctx, driverKey(license.owner));
-        const now = txSeconds(ctx);
-        const fineId = ctx.stub.getTxID();     // ID транзакции уникален и одинаков на всех пирах
-        driver.fines.push({ id: fineId, issuedAtSeconds: now, issuedAt: toIso(now), issuedBy: callerLogin(ctx), paidAt: null, paidAmount: null });
-        addMessage(ctx, driver, 'info', `Выписан штраф по удостоверению ${license.number}`);
-        await writeJson(ctx, driverKey(driver.login), driver);
+        const driver = await read(ctx, 'driver:' + license.owner);
+        const fineId = ctx.stub.getTxID();      // ID транзакции уникален и одинаков на всех пирах
+        driver.fines.push({ id: fineId, issuedAt: ctx.stub.getDateTimestamp().toISOString(), paidAt: null, paidAmount: null });
+        await answer(ctx, driver, true, 'Выписан штраф по удостоверению ' + licenseNumber);
 
-        // Если сотрудник ДПС сам водитель, запись о выписанном штрафе появится и в его истории
-        const officer = await readJson(ctx, driverKey(callerLogin(ctx)));
+        // Если сотрудник ДПС сам водитель, запись о штрафе появится и в его истории
+        const officer = await read(ctx, 'driver:' + callerLogin(ctx));
         if (officer && officer.login !== driver.login) {
-            addMessage(ctx, officer, 'info', `Вы выписали штраф водителю ${driver.fullName} по удостоверению ${license.number}`);
-            await writeJson(ctx, driverKey(officer.login), officer);
+            await answer(ctx, officer, true, 'Вы выписали штраф водителю ' + driver.fullName);
         }
-        return JSON.stringify({ ok: true, message: `Штраф выписан водителю ${driver.fullName}`, fineId });
+        return JSON.stringify({ ok: true, message: 'Штраф выписан водителю ' + driver.fullName, fineId: fineId });
     }
 
     /**
-     * Оплата штрафа. 5 ProfiCoin в первые 5 дней (минут), затем 10 ProfiCoin.
-     * Деньги поступают на счёт банка.
+     * Оплата своего штрафа: 5 ProfiCoin в первые 5 минут, затем 10. Деньги поступают банку.
      * @param {string} fineId ID штрафа
      * @returns {string} JSON { ok, message }
      */
@@ -342,73 +288,64 @@ class TrafficContract extends Contract {
             throw new Error('У вас нет штрафа с таким ID');
         }
         if (fine.paidAt) {
-            return reject(ctx, driver, 'Отказ: штраф уже оплачен');
+            return answer(ctx, driver, false, 'Отказ: штраф уже оплачен');
         }
-        const now = txSeconds(ctx);
-        const amount = fineAmount(fine, now);
+        const amount = fineAmount(ctx, fine);
         if (driver.balance < amount) {
-            return reject(ctx, driver, `Отказ: недостаточно средств, нужно ${amount} ProfiCoin`);
+            return answer(ctx, driver, false, 'Отказ: недостаточно средств, нужно ' + amount + ' ProfiCoin');
         }
-        const bank = await readJson(ctx, BANK_KEY);
+        const bank = await read(ctx, 'bank');
+        const now = ctx.stub.getDateTimestamp().toISOString();
         driver.balance -= amount;
         bank.balance += amount;
-        bank.payments.push({ at: toIso(now), from: driver.fullName, amount });
-        fine.paidAt = toIso(now);
+        bank.payments.push({ at: now, from: driver.fullName, amount: amount });
+        fine.paidAt = now;
         fine.paidAmount = amount;
-        await writeJson(ctx, BANK_KEY, bank);
-        return accept(ctx, driver, `Штраф оплачен: ${amount} ProfiCoin`);
+        await write(ctx, 'bank', bank);
+        return answer(ctx, driver, true, 'Штраф оплачен: ' + amount + ' ProfiCoin');
     }
 
     /**
-     * Кто вызвал: используется интерфейсом при входе, чтобы показать нужные функции.
-     * @returns {string} JSON { login, isBank, isDps, isDriver }
-     */
-    async WhoAmI(ctx) {
-        const isUsers = ctx.clientIdentity.getMSPID() === USERS_MSP;
-        const login = callerLogin(ctx);
-        return JSON.stringify({
-            login,
-            isBank: ctx.clientIdentity.getMSPID() === BANK_MSP,
-            isDps: isUsers && callerRole(ctx) === ROLE_DPS,
-            isDriver: isUsers && Boolean(await readJson(ctx, driverKey(login))),
-        });
-    }
-
-    /**
-     * Личный кабинет вызывающего водителя.
-     * @returns {string} JSON: данные водителя, стаж, число неоплаченных штрафов,
-     * текущая стоимость каждого штрафа и признак сотрудника ДПС
+     * Личный кабинет водителя.
+     * @returns {string} JSON: данные водителя, стаж, число неоплаченных штрафов и сумма каждого штрафа сейчас
      */
     async GetMyProfile(ctx) {
         const driver = await currentDriver(ctx);
-        const now = txSeconds(ctx);
-        return JSON.stringify({
-            ...driver,
-            isDps: callerRole(ctx) === ROLE_DPS,
-            experienceYears: new Date(now * 1000).getUTCFullYear() - driver.experienceStartYear,
-            unpaidFines: driver.fines.filter((fine) => !fine.paidAt).length,
-            fines: driver.fines.map((fine) => ({
-                ...fine,
-                currentAmount: fine.paidAt ? null : fineAmount(fine, now),
-                discountSecondsLeft: fine.paidAt ? 0 : Math.max(0, fine.issuedAtSeconds + DISCOUNT_DAYS * SECONDS_PER_GAME_DAY - now),
-            })),
-        });
+        driver.experienceYears = ctx.stub.getDateTimestamp().getFullYear() - driver.experienceStartYear;
+        driver.unpaidFines = driver.fines.filter((fine) => !fine.paidAt).length;
+        for (const fine of driver.fines) {
+            if (!fine.paidAt) {
+                fine.currentAmount = fineAmount(ctx, fine);
+            }
+        }
+        return JSON.stringify(driver);
     }
 
     /**
-     * Счёт банка. Только для аккаунта банка.
+     * Счёт банка. Только для пользователей организации Bank.
      * @returns {string} JSON { balance, payments }
      */
     async GetBankAccount(ctx) {
-        requireBank(ctx);
-        const bank = await readJson(ctx, BANK_KEY);
-        if (!bank) {
-            throw new Error('Реестр не инициализирован');
+        if (ctx.clientIdentity.getMSPID() !== BANK_MSP) {
+            throw new Error('Доступ только для аккаунта банка');
         }
-        return JSON.stringify(bank);
+        return JSON.stringify(await read(ctx, 'bank'));
+    }
+
+    /**
+     * Кто вызвал: интерфейс по ответу решает, какие функции показать.
+     * @returns {string} JSON { login, isBank, isDps, isDriver }
+     */
+    async WhoAmI(ctx) {
+        const login = callerLogin(ctx);
+        return JSON.stringify({
+            login: login,
+            isBank: ctx.clientIdentity.getMSPID() === BANK_MSP,
+            isDps: isDps(ctx),
+            isDriver: ctx.clientIdentity.getMSPID() === USERS_MSP && (await read(ctx, 'driver:' + login)) !== null,
+        });
     }
 }
 
 // Fabric загружает контракты из этого массива
-module.exports = TrafficContract;
 module.exports.contracts = [TrafficContract];

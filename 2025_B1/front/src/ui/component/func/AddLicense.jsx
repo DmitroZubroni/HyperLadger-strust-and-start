@@ -7,23 +7,28 @@ const AddLicense = () => {
 
     const [number, setNumber] = useState("");
     const [expiresAt, setExpiresAt] = useState("");
-    const [category, setCategory] = useState("");
+    const [category, setCategory] = useState("A");
 
     const handleSubmit = async (e) => {
         e.preventDefault();
-
+        // Поле даты отдаёт ГГГГ-ММ-ДД: в этом формате даты хранит контракт
         await post("AddLicense", [number, expiresAt, category]);
     };
 
     return (
         <Form onSubmit={handleSubmit}>
             <h2>AddLicense</h2>
-            <FormControl placeholder="Номер удостоверения" onChange={(e) => setNumber(e.target.value)} />
+            <FormControl placeholder="Номер удостоверения" required onChange={(e) => setNumber(e.target.value)} />
             <hr/>
-            <FormControl placeholder="Срок действия ДД.ММ.ГГГГ" onChange={(e) => setExpiresAt(e.target.value)} />
+            <Form.Label>Срок действия</Form.Label>
+            <FormControl type="date" required onChange={(e) => setExpiresAt(e.target.value)} />
             <hr/>
-            <FormControl placeholder="Категория A, B или C" onChange={(e) => setCategory(e.target.value)} />
-
+            <Form.Select onChange={(e) => setCategory(e.target.value)}>
+                <option>A</option>
+                <option>B</option>
+                <option>C</option>
+            </Form.Select>
+            <hr/>
             <Button type="submit">Отправить</Button>
         </Form>
     );

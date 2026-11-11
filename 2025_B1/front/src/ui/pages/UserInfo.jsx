@@ -1,53 +1,43 @@
 import { Container, Row, Col, Card, Alert, Button, Table } from "react-bootstrap";
 import Header from "../component/Header.jsx";
 import { AtlantContext } from "../../core/context.jsx";
-import { useContext, useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useState } from "react";
 import Authorization from "../component/Authorization.jsx";
 
 const UserInfo = () => {
     const { user, isBank, isDps, isDriver, get, post } = useContext(AtlantContext);
     const [data, setData] = useState(null);
     const [error, setError] = useState("");
-    // ID штрафа, который сейчас оплачивается: кнопка блокируется, чтобы не оплатить дважды.
-    // busy срабатывает сразу, ещё до перерисовки кнопки, поэтому повторный клик не отправит запрос
+    // ID штрафа, который сейчас оплачивается: кнопка блокируется до ответа
     const [paying, setPaying] = useState("");
-    const busy = useRef(false);
 
-    // Личный кабинет банка или водителя: данные читаются из контракта.
-    // forUser — для кого загружены данные, чтобы после смены пользователя не показать чужие
+    // Личный кабинет банка или водителя: данные читаются из контракта
     const load = async () => {
         try {
-            let result;
             if (isBank) {
-                result = await get("GetBankAccount");
+                setData(await get("GetBankAccount"));
             } else if (isDriver) {
-                result = await get("GetMyProfile");
-            } else {
-                result = {};
+                setData(await get("GetMyProfile"));
             }
-            setData({ ...result, forUser: user });
             setError("");
         } catch (e) {
-            setData(null);
             setError(e.message);
         }
     };
 
+    // Сменился пользователь: убираем данные прежнего и загружаем свои
     useEffect(() => {
-        if (!user) return;
-        load();
+        setData(null);
+        if (user) {
+            load();
+        }
     }, [user]);
 
-    const ready = data && data.forUser === user;
-
     const payFine = async (fineId) => {
-        if (busy.current) return;
-        busy.current = true;
         setPaying(fineId);
         await post("PayFine", [fineId]);
         await load();
         setPaying("");
-        busy.current = false;
     };
 
     return (
@@ -63,7 +53,7 @@ const UserInfo = () => {
 
                     {error && <Alert variant="warning">{error}</Alert>}
 
-                    {ready && isDps && !isDriver && (
+                    {isDps && !isDriver && (
                         <Card className="container">
                             <Card.Body>
                                 <Card.Title>Сотрудник ДПС</Card.Title>
@@ -72,7 +62,7 @@ const UserInfo = () => {
                         </Card>
                     )}
 
-                    {ready && isBank && (
+                    {data && isBank && (
                         <Card className="container">
                             <Card.Body>
                                 <Card.Title>Счёт банка: {data.balance} ProfiCoin</Card.Title>
@@ -94,18 +84,18 @@ const UserInfo = () => {
                         </Card>
                     )}
 
-                    {ready && isDriver && (
+                    {data && isDriver && (
                         <Row>
                             <Col>
                                 <Card className="container">
                                     <Card.Body>
                                         <Card.Title>{data.fullName}</Card.Title>
-                                        <p>Роль: {data.isDps ? "сотрудник ДПС и водитель" : "водитель"}</p>
+                                        <p>Роль: {isDps ? "сотрудник ДПС и водитель" : "водитель"}</p>
                                         <p>Баланс: {data.balance} ProfiCoin</p>
                                         <p>Стаж: {data.experienceYears} лет (с {data.experienceStartYear})</p>
                                         <p>Неоплаченные штрафы: {data.unpaidFines}</p>
                                         <p>Удостоверение: {data.license
-                                            ? `№ ${data.license.number}, категория ${data.license.category}, до ${data.license.expiresAt}`
+                                            ? `№ ${data.license.number}, категория ${data.license.category}, до ${new Date(data.license.expiresAt).toLocaleDateString()}`
                                             : "нет"}</p>
                                         <p>Транспортные средства: {data.vehicles.length === 0 ? "нет" : data.vehicles
                                             .map((v) => `${v.marketValue} ProfiCoin, ${v.serviceLife} лет`)
@@ -137,7 +127,7 @@ const UserInfo = () => {
                                         <Card.Title>Сообщения</Card.Title>
                                         {data.messages.length === 0 && <p>Сообщений нет</p>}
                                         {data.messages.slice().reverse().map((message, index) => (
-                                            <Alert key={index} variant={message.type === "error" ? "danger" : "success"}>
+                                            <Alert key={index} variant={message.ok ? "success" : "danger"}>
                                                 {new Date(message.at).toLocaleString()}: {message.text}
                                             </Alert>
                                         ))}
